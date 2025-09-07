@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <vector>
 #include <memory>
+#include <queue>
 
 namespace project {
     namespace server {
@@ -23,6 +24,12 @@ namespace project {
             CLOSING
         };
 
+        struct VideoFrame {
+            std::vector<char> data;
+            uint64_t pts; // Presentation timestamp in milliseconds
+            bool is_keyframe;
+        };
+
         struct Connection {
             sock_t fd;
             uint32_t clientId;
@@ -30,18 +37,23 @@ namespace project {
             std::string inBuffer;     // raw bytes received from socket
             std::string playerBuffer; // bytes pending to write to player
 
-            // Buffering to guarantee SPS/PPS delivered before frames
-            std::vector<std::vector<char>> buffered_packets; // each element is a raw payload (one or multiple NALs)
+            // Buffering with timestamps
+            std::queue<VideoFrame> frame_queue;
+            uint64_t last_pts;
+            uint64_t first_pts;
+            bool first_frame_received;
+
             std::vector<char> sps_data;
             std::vector<char> pps_data;
             bool sps_received{false};
             bool pps_received{false};
-            bool need_to_send_sps_pps{false}; // Флаг: нужно отправить SPS/PPS перед следующим IDR
 
             std::unique_ptr<project::player::PlayerProcess> player;
 
-            Connection() : fd(INVALID_SOCK), clientId(0), state(State::READING) {}
-            explicit Connection(sock_t s) : fd(s), clientId(0), state(State::READING) {}
+            Connection() : fd(INVALID_SOCK), clientId(0), state(State::READING),
+                           last_pts(0), first_pts(0), first_frame_received(false) {}
+            explicit Connection(sock_t s) : fd(s), clientId(0), state(State::READING),
+                                            last_pts(0), first_pts(0), first_frame_received(false) {}
         };
 
         class Server {
@@ -60,6 +72,7 @@ namespace project {
             void handleUdpPacket(sock_t udpFd);
             void closeConnection(sock_t fd);
             void flushPlayerBuffer(Connection &c);
+            void processFrameQueue(Connection &c);
 
             // helper to analyze nal types in a payload
             static void analyze_nal_types(const std::vector<char> &payload, bool &hasSps, bool &hasPps, bool &hasIdr);

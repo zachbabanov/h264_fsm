@@ -92,6 +92,16 @@ namespace project {
 #endif
         }
 
+        uint64_t ntoh_u64(uint64_t v) {
+            if (htonl(1) == 1) return v; // big endian
+            return ((uint64_t)ntohl(v & 0xFFFFFFFF) << 32) | ntohl(v >> 32);
+        }
+
+        uint64_t hton_u64(uint64_t v) {
+            if (htonl(1) == 1) return v; // big endian
+            return ((uint64_t)htonl(v & 0xFFFFFFFF) << 32) | htonl(v >> 32);
+        }
+
         uint32_t ntoh_u32(uint32_t v) { return ntohl(v); }
         uint16_t ntoh_u16(uint16_t v) { return ntohs(v); }
         uint32_t hton_u32(uint32_t v) { return htonl(v); }

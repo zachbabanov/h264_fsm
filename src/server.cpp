@@ -1,11 +1,12 @@
 #include "server.hpp"
 #include "common.hpp"
-#include "encoder.hpp" // StubFec, FecPacketHeader, project::fec::FEC_PACKET_HEADER_SIZE
+#include "encoder.hpp"
 #include "logger.hpp"
 #include <cerrno>
 #include <cstring>
 #include <iostream>
 #include <algorithm>
+#include <chrono>
 
 #ifdef __linux__
 #include <arpa/inet.h>
@@ -281,15 +282,19 @@ void Server::acceptNewConnections() {
             // create connection object
             Connection conn(cfd);
 
-            // Launch player process with proper arguments for stdin input
+            // Launch player process with proper arguments for low latency
             std::vector<std::string> player_args = {
                     "-fflags", "nobuffer",
                     "-flags", "low_delay",
                     "-framedrop",
                     "-strict", "experimental",
                     "-f", "h264",
-                    "-i", "-",  // Critical: read from stdin
-                    "-window_title", "Stream from client " + std::to_string(nextClientId_)
+                    "-i", "-",
+                    "-window_title", "Stream from client " + std::to_string(nextClientId_),
+                    "-avioflags", "direct",
+                    "-max_delay", "0",
+                    "-probesize", "32",
+                    "-analyzeduration", "0"
             };
             conn.player = project::player::PlayerProcess::launch(playerCmd_, player_args);
             if (!conn.player) {
@@ -392,65 +397,29 @@ void Server::handleClientEvent(sock_t fd, uint32_t events) {
                                 LOG_PLAYER_INFO("Detected PPS for client_id={}", conn.clientId);
                             }
 
-                            // Если это IDR фрейм и у нас есть SPS и PPS, но они еще не были отправлены, установим флаг
-                            if (payload_has_idr && conn.sps_received && conn.pps_received) {
-                                conn.need_to_send_sps_pps = true;
+                            // Create video frame with timestamp
+                            VideoFrame frame;
+                            frame.data = pkt.payload;
+                            frame.is_keyframe = payload_has_idr;
+
+                            // Calculate PTS based on packet sequence number (simple approach)
+                            // In a real implementation, you'd use proper timestamps from the encoder
+                            frame.pts = hdr.packet_seq * 40; // Assume 25 fps = 40ms per frame
+
+                            // Add to frame queue
+                            conn.frame_queue.push(frame);
+
+                            if (!conn.first_frame_received) {
+                                conn.first_frame_received = true;
+                                conn.first_pts = frame.pts;
                             }
 
-                            // Если у нас есть IDR фрейм и нужно отправить SPS/PPS
-                            if (payload_has_idr && conn.need_to_send_sps_pps) {
-                                // Сбрасываем флаг
-                                conn.need_to_send_sps_pps = false;
-                                // Формируем пакет: SPS, PPS, IDR
-                                std::vector<char> combined;
-                                combined.insert(combined.end(), conn.sps_data.begin(), conn.sps_data.end());
-                                combined.insert(combined.end(), conn.pps_data.begin(), conn.pps_data.end());
-                                combined.insert(combined.end(), pkt.payload.begin(), pkt.payload.end());
-
-                                ssize_t w = conn.player->write_data(combined.data(), combined.size());
-                                if (w < 0) {
-                                    conn.state = State::CLOSING;
-                                    break;
-                                }
-                                if ((size_t)w < combined.size()) {
-                                    conn.playerBuffer.append(combined.data() + w, combined.data() + combined.size());
-                                }
-                                LOG_PLAYER_INFO("Sent SPS, PPS and IDR frame for client_id={}", conn.clientId);
-                            }
-                            else if (payload_has_idr) {
-                                // IDR фрейм, но SPS/PPS уже отправлены, отправляем только IDR
-                                ssize_t w = conn.player->write_data(pkt.payload.data(), pkt.payload.size());
-                                if (w < 0) {
-                                    conn.state = State::CLOSING;
-                                    break;
-                                }
-                                if ((size_t)w < pkt.payload.size()) {
-                                    conn.playerBuffer.append(pkt.payload.data() + w, pkt.payload.data() + pkt.payload.size());
-                                }
-                            }
-                            else {
-                                // Не-IDR фрейм, отправляем как есть
-                                ssize_t w = conn.player->write_data(pkt.payload.data(), pkt.payload.size());
-                                if (w < 0) {
-                                    conn.state = State::CLOSING;
-                                    break;
-                                }
-                                if ((size_t)w < pkt.payload.size()) {
-                                    conn.playerBuffer.append(pkt.payload.data() + w, pkt.payload.data() + pkt.payload.size());
-                                }
-                            }
-
-                            // Проверяем буфер игрока на превышение
-                            if (conn.playerBuffer.size() > MAX_PLAYER_BUFFER_HARD) {
-                                LOG_GEN_ERROR("player_buf exceeded HARD limit for client {}; closing", conn.clientId);
-                                conn.state = State::CLOSING;
-                                break;
-                            } else if (conn.playerBuffer.size() > MAX_PLAYER_BUFFER) {
-                                size_t drop = conn.playerBuffer.size() / 2;
-                                conn.playerBuffer.erase(0, drop);
-                                LOG_GEN_WARN("player_buf exceeded soft limit for client {}; dropped {} bytes", conn.clientId, drop);
-                            }
+                            LOG_PLAYER_INFO("Queued frame for client_id={} pts={} is_keyframe={} size={}",
+                                            conn.clientId, frame.pts, frame.is_keyframe, frame.data.size());
                         } // parsing loop
+
+                        // Process frame queue
+                        processFrameQueue(conn);
                     } else if (n == 0) {
                         LOG_NET_INFO("peer closed connection fd={}", (long long)fd);
                         conn.state = State::CLOSING;
@@ -481,6 +450,70 @@ void Server::handleClientEvent(sock_t fd, uint32_t events) {
             break;
         default:
             break;
+    }
+}
+
+void Server::processFrameQueue(Connection &conn) {
+    static auto start_time = std::chrono::steady_clock::now();
+
+    while (!conn.frame_queue.empty()) {
+        VideoFrame &frame = conn.frame_queue.front();
+
+        // Calculate when this frame should be displayed
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count();
+
+        // If it's time to display this frame (or if we're behind)
+        if (elapsed_ms >= frame.pts - conn.first_pts || conn.frame_queue.size() > 10) {
+            // For keyframes, make sure we have SPS/PPS
+            if (frame.is_keyframe && conn.sps_received && conn.pps_received) {
+                // Prepend SPS and PPS to keyframe
+                std::vector<char> combined;
+                combined.insert(combined.end(), conn.sps_data.begin(), conn.sps_data.end());
+                combined.insert(combined.end(), conn.pps_data.begin(), conn.pps_data.end());
+                combined.insert(combined.end(), frame.data.begin(), frame.data.end());
+
+                ssize_t w = conn.player->write_data(combined.data(), combined.size());
+                if (w < 0) {
+                    conn.state = State::CLOSING;
+                    return;
+                }
+                if ((size_t)w < combined.size()) {
+                    conn.playerBuffer.append(combined.data() + w, combined.data() + combined.size());
+                }
+
+                LOG_PLAYER_INFO("Sent keyframe with SPS/PPS for client_id={} pts={} size={}",
+                                conn.clientId, frame.pts, combined.size());
+            } else {
+                // Send frame as-is
+                ssize_t w = conn.player->write_data(frame.data.data(), frame.data.size());
+                if (w < 0) {
+                    conn.state = State::CLOSING;
+                    return;
+                }
+                if ((size_t)w < frame.data.size()) {
+                    conn.playerBuffer.append(frame.data.data() + w, frame.data.data() + frame.data.size());
+                }
+
+                LOG_PLAYER_INFO("Sent frame for client_id={} pts={} size={}",
+                                conn.clientId, frame.pts, frame.data.size());
+            }
+
+            conn.frame_queue.pop();
+        } else {
+            // Wait for the right time to display this frame
+            break;
+        }
+    }
+
+    // Check player buffer size
+    if (conn.playerBuffer.size() > MAX_PLAYER_BUFFER_HARD) {
+        LOG_GEN_ERROR("player_buf exceeded HARD limit for client {}; closing", conn.clientId);
+        conn.state = State::CLOSING;
+    } else if (conn.playerBuffer.size() > MAX_PLAYER_BUFFER) {
+        size_t drop = conn.playerBuffer.size() / 2;
+        conn.playerBuffer.erase(0, drop);
+        LOG_GEN_WARN("player_buf exceeded soft limit for client {}; dropped {} bytes", conn.clientId, drop);
     }
 }
 

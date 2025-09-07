@@ -17,6 +17,7 @@ std::vector<char> StubFec::encode_with_header(uint32_t client_id,
                                               uint16_t fec_k,
                                               uint16_t fec_m,
                                               uint16_t flags,
+                                              uint64_t pts,
                                               const char *data,
                                               size_t len) {
     std::vector<char> out;
@@ -26,14 +27,15 @@ std::vector<char> StubFec::encode_with_header(uint32_t client_id,
     hdr.fec_k = hton_u16(fec_k);
     hdr.fec_m = hton_u16(fec_m);
     hdr.flags = hton_u16(flags);
-    hdr.payload_len = hton_u32((uint32_t)len); // stub: encoded payload length == len
+    hdr.payload_len = hton_u32((uint32_t)len);
+    hdr.pts = hton_u64(pts); // Convert to network byte order
 
     out.resize(FEC_PACKET_HEADER_SIZE + len);
     std::memcpy(out.data(), &hdr, FEC_PACKET_HEADER_SIZE);
     if (len) std::memcpy(out.data() + FEC_PACKET_HEADER_SIZE, data, len);
 
-    LOG_FEC_INFO("encode: client_id={} seq={} fec_k={} fec_m={} payload_len={} total_packet_len={}",
-                 client_id, packet_seq, fec_k, fec_m, (uint32_t)len, (uint32_t)out.size());
+    LOG_FEC_INFO("encode: client_id={} seq={} fec_k={} fec_m={} pts={} payload_len={} total_packet_len={}",
+                 client_id, packet_seq, fec_k, fec_m, pts, (uint32_t)len, (uint32_t)out.size());
 
     return out;
 }
@@ -52,6 +54,7 @@ FecPacketHeader StubFec::parse_header(const char *hdr_bytes, size_t hdr_len) {
     host.fec_m = ntoh_u16(net.fec_m);
     host.flags = ntoh_u16(net.flags);
     host.payload_len = ntoh_u32(net.payload_len);
+    host.pts = ntoh_u64(net.pts);
     return host;
 }
 
@@ -79,6 +82,7 @@ FecPacket StubFec::decode_packet(const char *packet_bytes, size_t packet_len) {
     pkt.fec_k = hdr.fec_k;
     pkt.fec_m = hdr.fec_m;
     pkt.flags = hdr.flags;
+    pkt.pts = hdr.pts;
     size_t payload_len = hdr.payload_len;
     if (packet_len < FEC_PACKET_HEADER_SIZE + payload_len) {
         LOG_FEC_DEBUG("decode_packet: incomplete expected={} have={}", (FEC_PACKET_HEADER_SIZE + payload_len), packet_len);
@@ -87,8 +91,8 @@ FecPacket StubFec::decode_packet(const char *packet_bytes, size_t packet_len) {
     const char *payload_ptr = packet_bytes + FEC_PACKET_HEADER_SIZE;
     pkt.payload = decode_payload(payload_ptr, payload_len);
 
-    LOG_FEC_INFO("decode_packet: client_id={} seq={} fec_k={} fec_m={} payload_len={} decoded_len={} recovered={}",
-                 pkt.client_id, pkt.packet_seq, pkt.fec_k, pkt.fec_m, (uint32_t)payload_len, (uint32_t)pkt.payload.size(), true);
+    LOG_FEC_INFO("decode_packet: client_id={} seq={} fec_k={} fec_m={} pts={} payload_len={} decoded_len={} recovered={}",
+                 pkt.client_id, pkt.packet_seq, pkt.fec_k, pkt.fec_m, pkt.pts, (uint32_t)payload_len, (uint32_t)pkt.payload.size(), true);
 
     return pkt;
 }

@@ -294,7 +294,9 @@ bool Client::tcpStreamRun(sock_t sock) {
             uint16_t fec_k = 10;
             uint16_t fec_m = 2;
             uint16_t flags = 0;
-            auto packet = encoder.encode_with_header(clientId_, packetSeq_++, fec_k, fec_m, flags, nal.data(), nal.size());
+            auto packet = encoder.encode_with_header(clientId_, packetSeq_++, fec_k, fec_m, flags,
+                                                     i * 40, // PTS based on frame index (40ms per frame for 25fps)
+                                                     nal.data(), nal.size());
 
             // send robustly (handle EAGAIN)
             size_t to_send = packet.size();

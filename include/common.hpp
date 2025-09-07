@@ -52,6 +52,8 @@ namespace project {
         void closeSocket(sock_t fd);
         int enableSocketKeepAliveAndNoDelay(sock_t fd);
 
+        uint64_t ntoh_u64(uint64_t v);
+        uint64_t hton_u64(uint64_t v);
         uint32_t ntoh_u32(uint32_t v);
         uint16_t ntoh_u16(uint16_t v);
         uint32_t hton_u32(uint32_t v);
