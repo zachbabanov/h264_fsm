@@ -78,7 +78,6 @@ static std::vector<char> extract_nal_by_type(const std::vector<char> &payload, u
         if (!sc_len) { ++p; continue; }
         size_t nal_start = p + sc_len;
         if (nal_start >= sz) break;
-        // find next start code
         size_t next_sc = std::string::npos;
         for (size_t q = nal_start; q + 2 < sz; ++q) {
             if (start_code_len_at(data, sz, q)) { next_sc = q; break; }
@@ -541,8 +540,16 @@ void Server::processFrameQueue(Connection &conn) {
         uint64_t elapsed_ms = (now >= conn.start_time_ms) ? (now - conn.start_time_ms) : 0;
         uint64_t target_offset = (frame.pts >= conn.first_pts) ? (frame.pts - conn.first_pts) : 0;
 
+        // compute latency: now - (start_time + target_offset)
+        int64_t latency_ms = (int64_t)now - (int64_t)(conn.start_time_ms + target_offset);
+
         // If it's time to display this frame (or if we're too far behind)
         if (elapsed_ms >= target_offset || conn.frame_queue.size() > 10) {
+
+            // Log latency for this frame
+            LOG_VIDEO_INFO("frame_latency: client_id={} pts={} target_offset={} elapsed={} latency={} queue_size={}",
+                           conn.clientId, frame.pts, (uint64_t)target_offset, (uint64_t)elapsed_ms, (int64_t)latency_ms, (uint32_t)conn.frame_queue.size());
+
             // For keyframes, make sure we have SPS/PPS
             if (frame.is_keyframe && conn.sps_received && conn.pps_received) {
                 // Prepend SPS and PPS to keyframe (SPS/ PPS are single NALs)

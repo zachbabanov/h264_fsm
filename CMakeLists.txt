@@ -8,6 +8,20 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # Include headers
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
+include(FetchContent)
+
+#
+# Fetch rscoder (header-only Reed-Solomon implementation)
+# Use the repository's default/main branch. Some repos use "main" instead of "master".
+#
+FetchContent_Declare(
+        rscoder
+        GIT_REPOSITORY https://github.com/zachbabanov/rscoder.git
+        GIT_TAG        main
+)
+# Attempt to download/populate rscoder; if this fails, CMake will report the failure.
+FetchContent_MakeAvailable(rscoder)
+
 # Core sources (exclude mains)
 set(PROJECT_SRC
         src/common.cpp
@@ -21,6 +35,13 @@ set(PROJECT_SRC
 # Build a static library with core functionality so tests can link against it.
 add_library(project_core STATIC ${PROJECT_SRC})
 target_include_directories(project_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
+
+# Make rscoder headers available to the core library (FetchContent populates <name>_SOURCE_DIR)
+if (DEFINED rscoder_SOURCE_DIR)
+    target_include_directories(project_core PRIVATE ${rscoder_SOURCE_DIR})
+else()
+    message(WARNING "rscoder was not populated into rscoder_SOURCE_DIR. Ensure rs.hpp is available in include path.")
+endif()
 
 if (WIN32)
     target_compile_definitions(project_core PRIVATE -D_WIN32_WINNT=0x0601)
@@ -40,7 +61,6 @@ target_include_directories(client PRIVATE ${CMAKE_SOURCE_DIR}/include)
 file(GLOB TEST_SOURCES "${CMAKE_SOURCE_DIR}/tests/*.cpp")
 
 if (TEST_SOURCES)
-    include(FetchContent)
     # Use Catch2 v2.13.10 (single header library via FetchContent). This will provide target Catch2::Catch2
     FetchContent_Declare(
             catch2
