@@ -36,6 +36,7 @@ namespace project {
             std::vector<char> pps_data;
             bool sps_received{false};
             bool pps_received{false};
+            bool need_to_send_sps_pps{false}; // Флаг: нужно отправить SPS/PPS перед следующим IDR
 
             std::unique_ptr<project::player::PlayerProcess> player;
 
@@ -61,7 +62,7 @@ namespace project {
             void flushPlayerBuffer(Connection &c);
 
             // helper to analyze nal types in a payload
-            static void analyze_nal_types(const std::vector<char> &payload, bool &hasSps, bool &hasPps);
+            static void analyze_nal_types(const std::vector<char> &payload, bool &hasSps, bool &hasPps, bool &hasIdr);
 
         private:
             int tcpPort_;

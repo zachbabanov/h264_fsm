@@ -82,22 +82,24 @@ std::unique_ptr<PlayerProcess> PlayerProcess::launch(const std::string &player_c
         dup2(pipefd[0], STDIN_FILENO);
         close(pipefd[0]);
         close(pipefd[1]);
+
         std::vector<char*> argv;
         if (app_args.empty()) {
-            argv.push_back(const_cast<char*>(player_cmd.c_str()));
-            argv.push_back(const_cast<char*>("-fflags"));
-            argv.push_back(const_cast<char*>("nobuffer"));
-            argv.push_back(const_cast<char*>("-flags"));
-            argv.push_back(const_cast<char*>("low_delay"));
-            argv.push_back(const_cast<char*>("-f"));
-            argv.push_back(const_cast<char*>("h264"));
-            argv.push_back(const_cast<char*>("-framedrop"));
-            argv.push_back(const_cast<char*>("-i"));
-            argv.push_back(const_cast<char*>("-"));
-            argv.push_back(nullptr);
+            // Default parameters for low-latency H.264 streaming from stdin
+            argv = build_argv(player_cmd, {
+                    "-fflags", "nobuffer",
+                    "-flags", "low_delay",
+                    "-framedrop",
+                    "-strict", "experimental",
+                    "-f", "h264",
+                    "-i", "-",  // Read from stdin
+                    "-window_title", "H.264 Stream Player"
+            });
         } else {
             argv = build_argv(player_cmd, app_args);
         }
+
+        // Execute the player
         execvp(player_cmd.c_str(), argv.data());
         perror("execvp player");
         _exit(1);
@@ -111,6 +113,7 @@ std::unique_ptr<PlayerProcess> PlayerProcess::launch(const std::string &player_c
         return p;
     }
 #else
+    // Windows implementation (unchanged)
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
@@ -124,7 +127,11 @@ std::unique_ptr<PlayerProcess> PlayerProcess::launch(const std::string &player_c
     }
     SetHandleInformation(child_stdin_wr, HANDLE_FLAG_INHERIT, 0);
 
-    std::string cmdline = player_cmd + " -f h264 -i -";
+    // Build command line with arguments
+    std::string cmdline = player_cmd;
+    for (const auto& arg : app_args) {
+        cmdline += " " + arg;
+    }
 
     STARTUPINFOA si{};
     si.cb = sizeof(si);

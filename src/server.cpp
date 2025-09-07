@@ -29,11 +29,12 @@ using namespace project::log;
 /**
  * analyze_nal_types:
  *  Scans Annex-B formatted payload (may contain 1+ NALs) and sets flags
- *  hasSps/hasPps when finds nal_unit_type == 7/8 respectively.
+ *  hasSps/hasPps/hasIdr when finds nal_unit_type == 7/8/5 respectively.
  */
-void Server::analyze_nal_types(const std::vector<char> &payload, bool &hasSps, bool &hasPps) {
-    hasSps = hasSps || false;
-    hasPps = hasPps || false;
+void Server::analyze_nal_types(const std::vector<char> &payload, bool &hasSps, bool &hasPps, bool &hasIdr) {
+    hasSps = false;
+    hasPps = false;
+    hasIdr = false;
     size_t sz = payload.size();
     auto is_start4 = [&](size_t p) {
         return p + 3 < sz &&
@@ -65,6 +66,7 @@ void Server::analyze_nal_types(const std::vector<char> &payload, bool &hasSps, b
         unsigned int nal_type = nal_byte & 0x1F;
         if (nal_type == 7) hasSps = true;
         if (nal_type == 8) hasPps = true;
+        if (nal_type == 5) hasIdr = true;
         // move p to search next start code after nal_header
         p = nal_header + 1;
     }
@@ -279,8 +281,17 @@ void Server::acceptNewConnections() {
             // create connection object
             Connection conn(cfd);
 
-            // Launch player process (PlayerProcess defined in player.hpp)
-            conn.player = project::player::PlayerProcess::launch(playerCmd_);
+            // Launch player process with proper arguments for stdin input
+            std::vector<std::string> player_args = {
+                    "-fflags", "nobuffer",
+                    "-flags", "low_delay",
+                    "-framedrop",
+                    "-strict", "experimental",
+                    "-f", "h264",
+                    "-i", "-",  // Critical: read from stdin
+                    "-window_title", "Stream from client " + std::to_string(nextClientId_)
+            };
+            conn.player = project::player::PlayerProcess::launch(playerCmd_, player_args);
             if (!conn.player) {
                 LOG_GEN_ERROR("Failed to launch player for client; closing socket {}", (long long)cfd);
                 closeSocket(cfd);
@@ -367,74 +378,47 @@ void Server::handleClientEvent(sock_t fd, uint32_t events) {
                             }
 
                             // pkt.payload is a vector<char> with one or more annex-b NALs
-                            bool payload_has_sps = false, payload_has_pps = false;
-                            analyze_nal_types(pkt.payload, payload_has_sps, payload_has_pps);
+                            bool payload_has_sps = false, payload_has_pps = false, payload_has_idr = false;
+                            analyze_nal_types(pkt.payload, payload_has_sps, payload_has_pps, payload_has_idr);
 
-                            if (!conn.sps_received || !conn.pps_received) {
-                                // Buffer until we have both SPS and PPS
-                                if (payload_has_sps && !conn.sps_received) {
-                                    conn.sps_received = true;
-                                    conn.sps_data = pkt.payload; // store entire payload (may contain SPS + maybe others)
-                                    LOG_PLAYER_INFO("Detected SPS for client_id={}", conn.clientId);
+                            if (payload_has_sps) {
+                                conn.sps_received = true;
+                                conn.sps_data = pkt.payload;
+                                LOG_PLAYER_INFO("Detected SPS for client_id={}", conn.clientId);
+                            }
+                            if (payload_has_pps) {
+                                conn.pps_received = true;
+                                conn.pps_data = pkt.payload;
+                                LOG_PLAYER_INFO("Detected PPS for client_id={}", conn.clientId);
+                            }
+
+                            // Если это IDR фрейм и у нас есть SPS и PPS, но они еще не были отправлены, установим флаг
+                            if (payload_has_idr && conn.sps_received && conn.pps_received) {
+                                conn.need_to_send_sps_pps = true;
+                            }
+
+                            // Если у нас есть IDR фрейм и нужно отправить SPS/PPS
+                            if (payload_has_idr && conn.need_to_send_sps_pps) {
+                                // Сбрасываем флаг
+                                conn.need_to_send_sps_pps = false;
+                                // Формируем пакет: SPS, PPS, IDR
+                                std::vector<char> combined;
+                                combined.insert(combined.end(), conn.sps_data.begin(), conn.sps_data.end());
+                                combined.insert(combined.end(), conn.pps_data.begin(), conn.pps_data.end());
+                                combined.insert(combined.end(), pkt.payload.begin(), pkt.payload.end());
+
+                                ssize_t w = conn.player->write_data(combined.data(), combined.size());
+                                if (w < 0) {
+                                    conn.state = State::CLOSING;
+                                    break;
                                 }
-                                if (payload_has_pps && !conn.pps_received) {
-                                    conn.pps_received = true;
-                                    conn.pps_data = pkt.payload;
-                                    LOG_PLAYER_INFO("Detected PPS for client_id={}", conn.clientId);
+                                if ((size_t)w < combined.size()) {
+                                    conn.playerBuffer.append(combined.data() + w, combined.data() + combined.size());
                                 }
-                                // push raw payload into buffered packets
-                                conn.buffered_packets.emplace_back(pkt.payload);
-                                // if now both found, flush: put SPS and PPS first, then all buffered packets (skipping duplicates)
-                                if (conn.sps_received && conn.pps_received) {
-                                    // Build a combined buffer: first unique SPS, then PPS, then remaining packets without duplicating SPS/PPS
-                                    std::string combined;
-                                    // helper lambda to append vector<char> to combined string
-                                    auto append_vec = [&](const std::vector<char> &v) {
-                                        combined.append(v.data(), v.data() + v.size());
-                                    };
-
-                                    // Ensure we append actual SPS and PPS NALs themselves:
-                                    // We attempt to extract SPS and PPS NALs from stored sps_data/pps_data;
-                                    // if sps_data/pps_data are larger than single NAL, that's ok — we append as-is.
-                                    append_vec(conn.sps_data);
-                                    append_vec(conn.pps_data);
-
-                                    // then append buffered packets in original order, skipping those equal to sps/pps to avoid duplicates
-                                    for (const auto &b : conn.buffered_packets) {
-                                        if (b == conn.sps_data || b == conn.pps_data) continue;
-                                        append_vec(b);
-                                    }
-
-                                    // Now write combined to player (using write_data)
-                                    ssize_t w = conn.player->write_data(combined.data(), combined.size());
-                                    if (w < 0) {
-                                        conn.state = State::CLOSING;
-                                        break;
-                                    }
-                                    if ((size_t)w < combined.size()) {
-                                        conn.playerBuffer.append(combined.data() + w, combined.data() + combined.size());
-                                    }
-                                    conn.buffered_packets.clear();
-                                    LOG_PLAYER_INFO("Flushed buffered stream to player for client_id={} bytes={}", conn.clientId, (uint32_t)combined.size());
-                                } else {
-                                    // Not enough info yet — continue buffering
-                                    LOG_PLAYER_INFO("Buffered packet for client_id={} buffered_count={} (sps={}, pps={})", conn.clientId, (unsigned)conn.buffered_packets.size(), conn.sps_received, conn.pps_received);
-                                    // Enforce buffer limits
-                                    size_t total_buf_bytes = 0;
-                                    for (const auto &bp : conn.buffered_packets) total_buf_bytes += bp.size();
-                                    if (total_buf_bytes > MAX_PLAYER_BUFFER_HARD) {
-                                        LOG_GEN_ERROR("buffered_packets exceeded HARD limit for client {}; closing", conn.clientId);
-                                        conn.state = State::CLOSING;
-                                        break;
-                                    } else if (total_buf_bytes > MAX_PLAYER_BUFFER) {
-                                        // drop first half of buffered packets
-                                        size_t drop_cnt = conn.buffered_packets.size() / 2;
-                                        conn.buffered_packets.erase(conn.buffered_packets.begin(), conn.buffered_packets.begin() + drop_cnt);
-                                        LOG_GEN_WARN("Dropped {} buffered packets for client_id={} due soft buffer limit", (unsigned)drop_cnt, conn.clientId);
-                                    }
-                                }
-                            } else {
-                                // we already have SPS/PPS — write directly to player (respecting partial writes)
+                                LOG_PLAYER_INFO("Sent SPS, PPS and IDR frame for client_id={}", conn.clientId);
+                            }
+                            else if (payload_has_idr) {
+                                // IDR фрейм, но SPS/PPS уже отправлены, отправляем только IDR
                                 ssize_t w = conn.player->write_data(pkt.payload.data(), pkt.payload.size());
                                 if (w < 0) {
                                     conn.state = State::CLOSING;
@@ -442,25 +426,29 @@ void Server::handleClientEvent(sock_t fd, uint32_t events) {
                                 }
                                 if ((size_t)w < pkt.payload.size()) {
                                     conn.playerBuffer.append(pkt.payload.data() + w, pkt.payload.data() + pkt.payload.size());
-                                    if (conn.playerBuffer.size() > MAX_PLAYER_BUFFER_HARD) {
-                                        LOG_GEN_ERROR("player_buf exceeded HARD limit for client {}; closing", conn.clientId);
-                                        conn.state = State::CLOSING;
-                                        break;
-                                    } else if (conn.playerBuffer.size() > MAX_PLAYER_BUFFER) {
-                                        size_t drop = conn.playerBuffer.size() / 2;
-                                        conn.playerBuffer.erase(0, drop);
-                                        LOG_GEN_WARN("player_buf exceeded soft limit for client {}; dropped {} bytes", conn.clientId, drop);
-                                    }
-#ifdef __linux__
-                                    int pfd = conn.player->get_write_fd();
-                                    if (pfd >= 0) {
-                                        epoll_event ev{};
-                                        ev.events = EPOLLOUT | EPOLLET;
-                                        ev.data.fd = pfd;
-                                        epoll_ctl(epollFd_, EPOLL_CTL_MOD, pfd, &ev);
-                                    }
-#endif
                                 }
+                            }
+                            else {
+                                // Не-IDR фрейм, отправляем как есть
+                                ssize_t w = conn.player->write_data(pkt.payload.data(), pkt.payload.size());
+                                if (w < 0) {
+                                    conn.state = State::CLOSING;
+                                    break;
+                                }
+                                if ((size_t)w < pkt.payload.size()) {
+                                    conn.playerBuffer.append(pkt.payload.data() + w, pkt.payload.data() + pkt.payload.size());
+                                }
+                            }
+
+                            // Проверяем буфер игрока на превышение
+                            if (conn.playerBuffer.size() > MAX_PLAYER_BUFFER_HARD) {
+                                LOG_GEN_ERROR("player_buf exceeded HARD limit for client {}; closing", conn.clientId);
+                                conn.state = State::CLOSING;
+                                break;
+                            } else if (conn.playerBuffer.size() > MAX_PLAYER_BUFFER) {
+                                size_t drop = conn.playerBuffer.size() / 2;
+                                conn.playerBuffer.erase(0, drop);
+                                LOG_GEN_WARN("player_buf exceeded soft limit for client {}; dropped {} bytes", conn.clientId, drop);
                             }
                         } // parsing loop
                     } else if (n == 0) {

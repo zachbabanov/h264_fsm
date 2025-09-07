@@ -261,7 +261,26 @@ bool Client::tcpStreamRun(sock_t sock) {
         }
     }
 #else
-    // on Windows we assume connect is established or blocking
+    // Windows - use select to check connection status
+    fd_set writefds;
+    FD_ZERO(&writefds);
+    FD_SET(sock, &writefds);
+    timeval timeout{};
+    timeout.tv_sec = 5;
+    timeout.tv_usec = 0;
+
+    int selret = select(0, NULL, &writefds, NULL, &timeout);
+    if (selret <= 0) {
+        LOG_GEN_ERROR("connect timeout or error");
+        return false;
+    } else {
+        int error = 0;
+        int error_size = sizeof(error);
+        if (getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)&error, &error_size) != 0 || error != 0) {
+            LOG_GEN_ERROR("connect failed err={}", error);
+            return false;
+        }
+    }
 #endif
 
     LOG_GEN_INFO("Connected to server {}:{}", host_, tcpPort_);
@@ -282,13 +301,16 @@ bool Client::tcpStreamRun(sock_t sock) {
             size_t sent = 0;
             while (sent < to_send) {
 #ifdef __linux__
-                ssize_t n = send(sock, packet.data() + sent, (int)(to_send - sent), 0);
+                ssize_t n = send(sock, packet.data() + sent, (int)(to_send - sent), MSG_NOSIGNAL);
                 if (n < 0) {
                     if (errno == EAGAIN || errno == EWOULDBLOCK) {
                         pollfd waitfd{};
                         waitfd.fd = sock;
                         waitfd.events = POLLOUT;
-                        poll(&waitfd, 1, 3000);
+                        if (poll(&waitfd, 1, 3000) <= 0) {
+                            LOG_NET_INFO("poll timeout during send");
+                            return false;
+                        }
                         continue;
                     } else {
                         LOG_NET_INFO("send failed errno={}", errno);
@@ -312,11 +334,14 @@ bool Client::tcpStreamRun(sock_t sock) {
 #endif
             }
             LOG_VIDEO_INFO("video_send: client_id={} seq={} nal_index={} nal_bytes={}", clientId_, packetSeq_-1, (unsigned)i, (uint32_t)nal.size());
+
+            // Small delay between NAL units to prevent overwhelming the server
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
 
         if (!loop_) break;
         // small sleep to avoid tight infinite loop saturating bandwidth in tests
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     } while (loop_);
 
     LOG_GEN_INFO("Stream finished, closing");
