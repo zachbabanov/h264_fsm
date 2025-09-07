@@ -10,6 +10,7 @@
 #include <vector>
 #include <memory>
 #include <queue>
+#include <cstdint>
 
 namespace project {
     namespace server {
@@ -43,6 +44,9 @@ namespace project {
             uint64_t first_pts;
             bool first_frame_received;
 
+            // Added: per-connection start time (ms since steady_clock epoch) to schedule frames reliably
+            uint64_t start_time_ms;
+
             std::vector<char> sps_data;
             std::vector<char> pps_data;
             bool sps_received{false};
@@ -51,9 +55,9 @@ namespace project {
             std::unique_ptr<project::player::PlayerProcess> player;
 
             Connection() : fd(INVALID_SOCK), clientId(0), state(State::READING),
-                           last_pts(0), first_pts(0), first_frame_received(false) {}
+                           last_pts(0), first_pts(0), first_frame_received(false), start_time_ms(0) {}
             explicit Connection(sock_t s) : fd(s), clientId(0), state(State::READING),
-                                            last_pts(0), first_pts(0), first_frame_received(false) {}
+                                            last_pts(0), first_pts(0), first_frame_received(false), start_time_ms(0) {}
         };
 
         class Server {

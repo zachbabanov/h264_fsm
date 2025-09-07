@@ -28,6 +28,75 @@ using namespace project::fec;
 using namespace project::log;
 
 /**
+ * Utility: current steady clock in ms.
+ */
+static uint64_t now_ms() {
+    using namespace std::chrono;
+    return (uint64_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+/**
+ * Find start-code at position p in buffer (3- or 4-byte). Returns length (3 or 4) or 0 if none.
+ */
+static size_t start_code_len_at(const char* data, size_t sz, size_t p) {
+    if (p + 3 < sz &&
+        (unsigned char)data[p] == 0x00 &&
+        (unsigned char)data[p+1] == 0x00 &&
+        (unsigned char)data[p+2] == 0x00 &&
+        (unsigned char)data[p+3] == 0x01) return 4;
+    if (p + 2 < sz &&
+        (unsigned char)data[p] == 0x00 &&
+        (unsigned char)data[p+1] == 0x00 &&
+        (unsigned char)data[p+2] == 0x01) return 3;
+    return 0;
+}
+
+/**
+ * Find position of next start-code in string buf starting from 'from' index.
+ * Returns std::string::npos if none found.
+ */
+static size_t find_next_start_code(const std::string &buf, size_t from = 0) {
+    size_t sz = buf.size();
+    const char* data = buf.data();
+    for (size_t p = from; p + 2 < sz; ++p) {
+        if (start_code_len_at(data, sz, p)) return p;
+    }
+    return std::string::npos;
+}
+
+/**
+ * Extract single NAL by type from Annex-B payload.
+ * Returns the NAL including its start-code (3 or 4 bytes) as a vector<char>.
+ * If not found, returns empty vector.
+ */
+static std::vector<char> extract_nal_by_type(const std::vector<char> &payload, unsigned int nal_type_to_find) {
+    size_t sz = payload.size();
+    const char* data = payload.data();
+    size_t p = 0;
+    while (p + 2 < sz) {
+        size_t sc_len = start_code_len_at(data, sz, p);
+        if (!sc_len) { ++p; continue; }
+        size_t nal_start = p + sc_len;
+        if (nal_start >= sz) break;
+        // find next start code
+        size_t next_sc = std::string::npos;
+        for (size_t q = nal_start; q + 2 < sz; ++q) {
+            if (start_code_len_at(data, sz, q)) { next_sc = q; break; }
+        }
+        unsigned char nal_byte = (unsigned char)data[nal_start];
+        unsigned int nal_type = nal_byte & 0x1F;
+        if (nal_type == nal_type_to_find) {
+            size_t nal_end = (next_sc == std::string::npos) ? sz : next_sc;
+            std::vector<char> out;
+            out.insert(out.end(), data + p, data + nal_end);
+            return out;
+        }
+        p = (next_sc == std::string::npos) ? sz : next_sc;
+    }
+    return {};
+}
+
+/**
  * analyze_nal_types:
  *  Scans Annex-B formatted payload (may contain 1+ NALs) and sets flags
  *  hasSps/hasPps/hasIdr when finds nal_unit_type == 7/8/5 respectively.
@@ -387,14 +456,21 @@ void Server::handleClientEvent(sock_t fd, uint32_t events) {
                             analyze_nal_types(pkt.payload, payload_has_sps, payload_has_pps, payload_has_idr);
 
                             if (payload_has_sps) {
-                                conn.sps_received = true;
-                                conn.sps_data = pkt.payload;
-                                LOG_PLAYER_INFO("Detected SPS for client_id={}", conn.clientId);
+                                // Extract only the SPS NAL (not entire payload)
+                                auto sps_nal = extract_nal_by_type(pkt.payload, 7);
+                                if (!sps_nal.empty()) {
+                                    conn.sps_received = true;
+                                    conn.sps_data = std::move(sps_nal);
+                                    LOG_PLAYER_INFO("Detected SPS for client_id={}", conn.clientId);
+                                }
                             }
                             if (payload_has_pps) {
-                                conn.pps_received = true;
-                                conn.pps_data = pkt.payload;
-                                LOG_PLAYER_INFO("Detected PPS for client_id={}", conn.clientId);
+                                auto pps_nal = extract_nal_by_type(pkt.payload, 8);
+                                if (!pps_nal.empty()) {
+                                    conn.pps_received = true;
+                                    conn.pps_data = std::move(pps_nal);
+                                    LOG_PLAYER_INFO("Detected PPS for client_id={}", conn.clientId);
+                                }
                             }
 
                             // Create video frame with timestamp
@@ -402,9 +478,8 @@ void Server::handleClientEvent(sock_t fd, uint32_t events) {
                             frame.data = pkt.payload;
                             frame.is_keyframe = payload_has_idr;
 
-                            // Calculate PTS based on packet sequence number (simple approach)
-                            // In a real implementation, you'd use proper timestamps from the encoder
-                            frame.pts = hdr.packet_seq * 40; // Assume 25 fps = 40ms per frame
+                            // Use pts from packet header (decoded) if present
+                            frame.pts = pkt.pts;
 
                             // Add to frame queue
                             conn.frame_queue.push(frame);
@@ -412,6 +487,7 @@ void Server::handleClientEvent(sock_t fd, uint32_t events) {
                             if (!conn.first_frame_received) {
                                 conn.first_frame_received = true;
                                 conn.first_pts = frame.pts;
+                                conn.start_time_ms = now_ms();
                             }
 
                             LOG_PLAYER_INFO("Queued frame for client_id={} pts={} is_keyframe={} size={}",
@@ -454,20 +530,22 @@ void Server::handleClientEvent(sock_t fd, uint32_t events) {
 }
 
 void Server::processFrameQueue(Connection &conn) {
-    static auto start_time = std::chrono::steady_clock::now();
+    // Use per-connection start_time_ms set when first frame received
+    if (!conn.first_frame_received) return;
 
     while (!conn.frame_queue.empty()) {
         VideoFrame &frame = conn.frame_queue.front();
 
-        // Calculate when this frame should be displayed
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count();
+        // Calculate when this frame should be displayed (relative to connection start_time)
+        uint64_t now = now_ms();
+        uint64_t elapsed_ms = (now >= conn.start_time_ms) ? (now - conn.start_time_ms) : 0;
+        uint64_t target_offset = (frame.pts >= conn.first_pts) ? (frame.pts - conn.first_pts) : 0;
 
-        // If it's time to display this frame (or if we're behind)
-        if (elapsed_ms >= frame.pts - conn.first_pts || conn.frame_queue.size() > 10) {
+        // If it's time to display this frame (or if we're too far behind)
+        if (elapsed_ms >= target_offset || conn.frame_queue.size() > 10) {
             // For keyframes, make sure we have SPS/PPS
             if (frame.is_keyframe && conn.sps_received && conn.pps_received) {
-                // Prepend SPS and PPS to keyframe
+                // Prepend SPS and PPS to keyframe (SPS/ PPS are single NALs)
                 std::vector<char> combined;
                 combined.insert(combined.end(), conn.sps_data.begin(), conn.sps_data.end());
                 combined.insert(combined.end(), conn.pps_data.begin(), conn.pps_data.end());
@@ -506,14 +584,21 @@ void Server::processFrameQueue(Connection &conn) {
         }
     }
 
-    // Check player buffer size
+    // Check player buffer size and trim safely (do NOT chop arbitrary bytes)
     if (conn.playerBuffer.size() > MAX_PLAYER_BUFFER_HARD) {
         LOG_GEN_ERROR("player_buf exceeded HARD limit for client {}; closing", conn.clientId);
         conn.state = State::CLOSING;
     } else if (conn.playerBuffer.size() > MAX_PLAYER_BUFFER) {
-        size_t drop = conn.playerBuffer.size() / 2;
-        conn.playerBuffer.erase(0, drop);
-        LOG_GEN_WARN("player_buf exceeded soft limit for client {}; dropped {} bytes", conn.clientId, drop);
+        // Try to drop whole NAL units from the front to reduce buffer without corrupting NAL boundaries
+        size_t cut_pos = find_next_start_code(conn.playerBuffer, 1); // find next possible nal boundary
+        if (cut_pos != std::string::npos) {
+            LOG_GEN_WARN("player_buf exceeded soft limit for client {}; dropping {} bytes up to next NAL", conn.clientId, cut_pos);
+            conn.playerBuffer.erase(0, cut_pos);
+        } else {
+            // No clear next start code — safer to clear entire buffer than to corrupt stream mid-NAL
+            LOG_GEN_WARN("player_buf exceeded soft limit and no start-code found; clearing buffer for client {}", conn.clientId);
+            conn.playerBuffer.clear();
+        }
     }
 }
 
@@ -604,8 +689,12 @@ void Server::handleUdpPacket(sock_t udpFd) {
                 if (cc.playerBuffer.size() > MAX_PLAYER_BUFFER_HARD) {
                     cc.state = State::CLOSING;
                 } else if (cc.playerBuffer.size() > MAX_PLAYER_BUFFER) {
-                    size_t drop = cc.playerBuffer.size() / 2;
-                    cc.playerBuffer.erase(0, drop);
+                    size_t cut_pos = find_next_start_code(cc.playerBuffer, 1);
+                    if (cut_pos != std::string::npos) {
+                        cc.playerBuffer.erase(0, cut_pos);
+                    } else {
+                        cc.playerBuffer.clear();
+                    }
                 }
 #ifdef __linux__
                 int pfd = cc.player ? cc.player->get_write_fd() : -1;

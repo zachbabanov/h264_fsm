@@ -338,7 +338,7 @@ bool Client::tcpStreamRun(sock_t sock) {
             LOG_VIDEO_INFO("video_send: client_id={} seq={} nal_index={} nal_bytes={}", clientId_, packetSeq_-1, (unsigned)i, (uint32_t)nal.size());
 
             // Small delay between NAL units to prevent overwhelming the server
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
         if (!loop_) break;
