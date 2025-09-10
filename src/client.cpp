@@ -287,15 +287,46 @@ bool Client::tcpStreamRun(sock_t sock) {
 
     StubFec encoder;
 
+    // We'll use a frame-based pts: increment pt_count only when we hit a VCL NAL (1 or 5).
+    uint64_t frame_count = 0;
+
     // Send NAL units in order; if loop_ is true, repeat indefinitely.
     do {
         for (size_t i = 0; i < nals.size(); ++i) {
             const auto &nal = nals[i];
+
+            // Determine start-code length and nal_unit_type
+            size_t sc_len = 0;
+            if (nal.size() >= 4 && (unsigned char)nal[0] == 0x00 && (unsigned char)nal[1] == 0x00 &&
+                (unsigned char)nal[2] == 0x00 && (unsigned char)nal[3] == 0x01) {
+                sc_len = 4;
+            } else if (nal.size() >= 3 && (unsigned char)nal[0] == 0x00 && (unsigned char)nal[1] == 0x00 &&
+                       (unsigned char)nal[2] == 0x01) {
+                sc_len = 3;
+            } else {
+                sc_len = 0;
+            }
+
+            int nal_type = -1;
+            if (sc_len > 0 && nal.size() > sc_len) {
+                unsigned char nal_byte = (unsigned char)nal[sc_len];
+                nal_type = nal_byte & 0x1F;
+            }
+
+            bool is_vcl = (nal_type == 1 || nal_type == 5);
+
+            // Assign pts: current frame_count * 40ms. If this nal is VCL, the frame_count advances AFTER using current pts.
+            uint64_t pts = frame_count * 40; // ms
+            if (is_vcl) {
+                // Use current pts for this VCL, then increment frame count for subsequent NALs
+                frame_count++;
+            }
+
             uint16_t fec_k = 10;
             uint16_t fec_m = 2;
             uint16_t flags = 0;
             auto packet = encoder.encode_with_header(clientId_, packetSeq_++, fec_k, fec_m, flags,
-                                                     i * 40, // PTS based on frame index (40ms per frame for 25fps)
+                                                     pts,
                                                      nal.data(), nal.size());
 
             // send robustly (handle EAGAIN)
@@ -335,10 +366,12 @@ bool Client::tcpStreamRun(sock_t sock) {
                 sent += (size_t)n;
 #endif
             }
-            LOG_VIDEO_INFO("video_send: client_id={} seq={} nal_index={} nal_bytes={}", clientId_, packetSeq_-1, (unsigned)i, (uint32_t)nal.size());
+            // Log as DEBUG to avoid heavy stdout overhead in hot loop
+            LOG_FEC_DEBUG("video_send: client_id={} seq={} nal_index={} nal_bytes={} nal_type={} pts={}", clientId_, packetSeq_-1, (unsigned)i, (uint32_t)nal.size(), nal_type, pts);
 
             // Small delay between NAL units to prevent overwhelming the server
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            // keep this small — we pace primarily by PTS; adjust if necessary for your environment
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
 
         if (!loop_) break;
