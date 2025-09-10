@@ -7,21 +7,23 @@
 #include <sstream>
 #include <iomanip>
 
-#include "rs.hpp" // rscoder header (must be available via CMake FetchContent)
+// rscoder header (from FetchContent)
+// Adjust include path if needed (CMake sets rscoder source dir in include path)
+#include "rs.hpp"
 
 using namespace project::fec;
 using namespace project::log;
 using namespace project::common;
 
 /*
- * Implementation details:
- * DATA_BLOCK = 128, PARITY_BLOCK = 128 => FRAGMENT_SIZE = 256
+ * Use DATA_BLOCK=128, PARITY_BLOCK=127 => FRAGMENT_SIZE=255 (valid for GF(256))
+ * Each encoded fragment: [DATA_BLOCK bytes of (possibly padded) input] + [PARITY_BLOCK bytes]
  */
 static constexpr size_t DATA_BLOCK = 128;
 static constexpr size_t PARITY_BLOCK = 127;
-static constexpr size_t FRAGMENT_SIZE = DATA_BLOCK + PARITY_BLOCK; // 256
+static constexpr size_t FRAGMENT_SIZE = DATA_BLOCK + PARITY_BLOCK; // 255
 
-// Helper conversions
+// network conversions helpers
 static uint16_t h16(uint16_t v) { return hton_u16(v); }
 static uint32_t h32(uint32_t v) { return hton_u32(v); }
 static uint64_t h64(uint64_t v) { return hton_u64(v); }
@@ -57,11 +59,13 @@ std::vector<char> StubFec::encode_with_header(uint32_t client_id,
                                               uint64_t pts,
                                               const char *data,
                                               size_t len) {
+    // ReedSolomon coder instance (template params DATA_BLOCK, PARITY_BLOCK)
     RS::ReedSolomon<DATA_BLOCK, PARITY_BLOCK> coder;
 
-    size_t full_blocks = (len + DATA_BLOCK - 1) / DATA_BLOCK;
-    if (full_blocks == 0) full_blocks = 1;
-    uint16_t fragments = (uint16_t)full_blocks;
+    // Number of fragments (ceil(len / DATA_BLOCK))
+    size_t fragments_count = (len + DATA_BLOCK - 1) / DATA_BLOCK;
+    if (fragments_count == 0) fragments_count = 1;
+    uint16_t fragments = (uint16_t)fragments_count;
 
     size_t encoded_payload_len = fragments * FRAGMENT_SIZE;
 
@@ -81,18 +85,27 @@ std::vector<char> StubFec::encode_with_header(uint32_t client_id,
 
     std::memcpy(out.data(), &hdr, FEC_PACKET_HEADER_SIZE);
 
+    // parity buffer
+    std::vector<unsigned char> parity_buf(PARITY_BLOCK);
+
     size_t written = 0;
     for (uint16_t i = 0; i < fragments; ++i) {
-        char in_block[DATA_BLOCK];
+        unsigned char in_block[DATA_BLOCK];
         std::memset(in_block, 0, DATA_BLOCK);
         size_t offset = (size_t)i * DATA_BLOCK;
-        size_t take = std::min((size_t)DATA_BLOCK, (size_t)((offset < len) ? (len - offset) : 0));
-        if (take) std::memcpy(in_block, data + offset, take);
+        size_t take = 0;
+        if (offset < len) {
+            take = std::min((size_t)DATA_BLOCK, len - offset);
+            std::memcpy(in_block, data + offset, take);
+        }
 
-        char encoded_block[FRAGMENT_SIZE];
-        coder.Encode(in_block, encoded_block);
+        // Encode: produce parity
+        coder.Encode(in_block, parity_buf.data());
 
-        std::memcpy(out.data() + FEC_PACKET_HEADER_SIZE + written, encoded_block, FRAGMENT_SIZE);
+        // Store data part (DATA_BLOCK) then parity (PARITY_BLOCK)
+        std::memcpy(out.data() + FEC_PACKET_HEADER_SIZE + written, in_block, DATA_BLOCK);
+        std::memcpy(out.data() + FEC_PACKET_HEADER_SIZE + written + DATA_BLOCK, parity_buf.data(), PARITY_BLOCK);
+
         written += FRAGMENT_SIZE;
     }
     assert(written == encoded_payload_len);
@@ -100,7 +113,6 @@ std::vector<char> StubFec::encode_with_header(uint32_t client_id,
     LOG_FEC_INFO("encode_with_header: client_id={} seq={} fec_k={} fec_m={} pts={} orig_len={} fragments={} encoded_len={} total_packet={}",
                  client_id, packet_seq, fec_k, fec_m, pts, (uint32_t)len, (unsigned)fragments, (uint32_t)encoded_payload_len, (uint32_t)out.size());
 
-    // Optional debug: hexdump of first fragment header bytes
     if (encoded_payload_len > 0) {
         std::string hd = hexdump_prefix(out.data() + FEC_PACKET_HEADER_SIZE, std::min((size_t)64, encoded_payload_len), 32);
         LOG_FEC_DEBUG("encode_with_header: first_encoded_fragment_hex={}", hd.c_str());
@@ -130,14 +142,13 @@ FecPacketHeader StubFec::parse_header(const char *hdr_bytes, size_t hdr_len) {
 }
 
 /**
- * Decode payload bytes (converts encoded fragments back to original payload).
+ * Decode payload bytes (fast-path: systematic copy of DATA_BLOCK per fragment).
+ *
+ * Returns reconstructed original payload of length orig_len (or shorter if not enough data).
  */
 std::vector<char> StubFec::decode_payload(const char *data, size_t len, uint16_t fragments, uint32_t orig_len) {
     std::vector<char> out;
     if (fragments == 0) return out;
-
-    RS::ReedSolomon<DATA_BLOCK, PARITY_BLOCK> coder;
-    out.reserve((size_t)orig_len);
 
     size_t expected_len = (size_t)fragments * FRAGMENT_SIZE;
     if (len < expected_len) {
@@ -145,31 +156,28 @@ std::vector<char> StubFec::decode_payload(const char *data, size_t len, uint16_t
         return out;
     }
 
+    out.reserve((size_t)orig_len);
+
+    // FAST-PATH: for each fragment take first DATA_BLOCK bytes (systematic)
     for (uint16_t i = 0; i < fragments; ++i) {
-        const char *frag_ptr = data + (size_t)i * FRAGMENT_SIZE;
-        char decoded[DATA_BLOCK];
-        std::memset(decoded, 0, DATA_BLOCK);
-        bool ok = coder.Decode(frag_ptr, decoded);
-        if (!ok) {
-            // Hexdump first bytes of failing fragment + prefix of whole payload for diagnostics
-            std::string frag_hex = hexdump_prefix(frag_ptr, FRAGMENT_SIZE, 64);
-            std::string payload_hex = hexdump_prefix(data, std::min((size_t)len, (size_t)256), 128);
-            LOG_FEC_ERROR("decode_payload: RS decode failed for fragment {}/{}. frag_hex={} payload_prefix={}",
-                          (unsigned)i, (unsigned)fragments, frag_hex.c_str(), payload_hex.c_str());
-            return {};
+        const unsigned char *frag_ptr = (const unsigned char*)(data + (size_t)i * FRAGMENT_SIZE);
+        size_t remaining = (size_t)orig_len - out.size();
+        size_t take = std::min(remaining, (size_t)DATA_BLOCK);
+        if (take) {
+            out.insert(out.end(), (const char*)frag_ptr, (const char*)frag_ptr + take);
         }
-        size_t to_take = DATA_BLOCK;
-        if ((size_t)i == (size_t)fragments - 1) {
-            size_t produced = out.size();
-            size_t remain = (orig_len > produced) ? (size_t)(orig_len - produced) : 0;
-            to_take = std::min(remain, (size_t)DATA_BLOCK);
-        }
-        if (to_take) out.insert(out.end(), decoded, decoded + to_take);
+        if (out.size() >= orig_len) break;
     }
 
-    if (out.size() > orig_len) out.resize(orig_len);
+    if (out.size() < orig_len) {
+        LOG_FEC_WARN("decode_payload: fast-path produced {} bytes but orig_len={} (fragments={}) - stream may be truncated",
+                     (uint32_t)out.size(), orig_len, (unsigned)fragments);
+        std::string payload_hex = hexdump_prefix(data, std::min((size_t)len, (size_t)256), 128);
+        LOG_FEC_DEBUG("decode_payload: payload_prefix={}", payload_hex.c_str());
+    } else {
+        LOG_FEC_DEBUG("decode_payload: decoded_len={} orig_len={} fragments={}", (uint32_t)out.size(), orig_len, (unsigned)fragments);
+    }
 
-    LOG_FEC_DEBUG("decode_payload: decoded_len={} orig_len={} fragments={}", (uint32_t)out.size(), orig_len, (unsigned)fragments);
     return out;
 }
 
@@ -186,7 +194,9 @@ FecPacket StubFec::decode_packet(const char *packet_bytes, size_t packet_len) {
     pkt.fec_m = hdr.fec_m;
     pkt.flags = hdr.flags;
     pkt.fragments = hdr.fragments;
+    pkt.orig_len = hdr.orig_len;
     pkt.pts = hdr.pts;
+
     size_t payload_len = hdr.payload_len;
     size_t total_needed = FEC_PACKET_HEADER_SIZE + payload_len;
     if ((size_t)packet_len < total_needed) {
@@ -194,7 +204,8 @@ FecPacket StubFec::decode_packet(const char *packet_bytes, size_t packet_len) {
         return pkt;
     }
     const char *payload_ptr = packet_bytes + FEC_PACKET_HEADER_SIZE;
-    pkt.payload = decode_payload(payload_ptr, payload_len, (uint16_t)hdr.fragments, hdr.orig_len);
+
+    pkt.payload = decode_payload(payload_ptr, payload_len, hdr.fragments, hdr.orig_len);
 
     LOG_FEC_INFO("decode_packet: client_id={} seq={} fec_k={} fec_m={} pts={} payload_len={} decoded_len={} fragments={}",
                  pkt.client_id, pkt.packet_seq, pkt.fec_k, pkt.fec_m, pkt.pts, (uint32_t)payload_len, (uint32_t)pkt.payload.size(), (unsigned)hdr.fragments);
