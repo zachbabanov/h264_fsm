@@ -12,15 +12,23 @@ include(FetchContent)
 
 #
 # Fetch rscoder (header-only Reed-Solomon implementation)
-# Use the repository's default/main branch. Some repos use "main" instead of "master".
 #
 FetchContent_Declare(
         rscoder
         GIT_REPOSITORY https://github.com/zachbabanov/rscoder.git
         GIT_TAG        main
 )
-# Attempt to download/populate rscoder; if this fails, CMake will report the failure.
 FetchContent_MakeAvailable(rscoder)
+
+#
+# Fetch fmt library
+#
+FetchContent_Declare(
+        fmt
+        GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+        GIT_TAG        11.2.0
+)
+FetchContent_MakeAvailable(fmt)
 
 # Core sources (exclude mains)
 set(PROJECT_SRC
@@ -42,6 +50,8 @@ if (DEFINED rscoder_SOURCE_DIR)
 else()
     message(WARNING "rscoder was not populated into rscoder_SOURCE_DIR. Ensure rs.hpp is available in include path.")
 endif()
+
+target_link_libraries(project_core PUBLIC fmt::fmt)
 
 if (WIN32)
     target_compile_definitions(project_core PRIVATE -D_WIN32_WINNT=0x0601)
