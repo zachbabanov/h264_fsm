@@ -34,8 +34,9 @@ namespace project {
         constexpr uint16_t CMD_REGISTER_RESP = 2;
         constexpr uint16_t CMD_HEARTBEAT = 3;
         constexpr uint16_t CMD_BROADCAST = 4;
+        constexpr uint16_t CMD_SET_BITRATE = 5; // NEW: set bitrate command (payload: uint32_t kbps in network order)
 
-// UDP header (network byte order fields)
+        // UDP header (network byte order fields)
 #pragma pack(push,1)
         struct UdpHeader {
             uint32_t client_id;

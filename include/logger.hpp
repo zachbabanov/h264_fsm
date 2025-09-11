@@ -131,6 +131,7 @@ private:
 #define LOG_FEC_ERROR(fmt, ...) project::log::Logger::instance().logf(project::log::Level::ERROR, project::log::Category::FEC, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define LOG_PLAYER_INFO(fmt, ...) project::log::Logger::instance().logf(project::log::Level::INFO, project::log::Category::PLAYER, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define LOG_NET_INFO(fmt, ...) project::log::Logger::instance().logf(project::log::Level::INFO, project::log::Category::NETWORK, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_NET_WARN(fmt, ...) project::log::Logger::instance().logf(project::log::Level::WARN, project::log::Category::NETWORK, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
 } // namespace project::log
 

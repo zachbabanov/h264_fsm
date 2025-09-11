@@ -6,6 +6,10 @@
 #include "common.hpp"
 #include <string>
 #include <vector>
+#include <atomic>
+#include <thread>
+#include <mutex>
+#include <chrono>
 
 namespace project {
     namespace client {
@@ -16,6 +20,9 @@ namespace project {
             ~Client();
 
             bool run();
+
+            /// Set initial bitrate (kbps). 0 = unlimited.
+            void set_initial_bitrate(uint32_t kbps);
 
         private:
             bool initAndConnect(project::common::sock_t &outTcp, project::common::sock_t &outUdp);
@@ -28,6 +35,14 @@ namespace project {
             // Helpers
             static std::vector<std::vector<char>> extractAnnexBNals(const std::vector<char> &data);
 
+            // UDP command listener (changes bitrate at runtime)
+            void startUdpListener(project::common::sock_t udpSock);
+            void stopUdpListener();
+            void udpListenerLoop(project::common::sock_t udpSock);
+
+            // pacing
+            void pace_before_send(size_t bytes);
+
         private:
             std::string host_;
             int tcpPort_;
@@ -36,6 +51,16 @@ namespace project {
             bool loop_;
             uint32_t clientId_;
             uint32_t packetSeq_;
+
+            // rate control
+            std::atomic<uint32_t> bitrate_kbps_; // 0 = unlimited
+            std::mutex rate_mtx_;
+            double tokens_; // bytes currently available
+            std::chrono::steady_clock::time_point last_fill_;
+
+            // UDP listener thread
+            std::thread udp_listener_thread_;
+            std::atomic<bool> stop_udp_listener_;
         };
 
     } // namespace client

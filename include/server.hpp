@@ -11,6 +11,7 @@
 #include <memory>
 #include <queue>
 #include <chrono>
+#include <netinet/in.h>
 
 namespace project {
     namespace server {
@@ -96,6 +97,9 @@ namespace project {
             std::unordered_map<int, sock_t> playerFdToClientFd_;
 #endif
             std::unordered_map<sock_t, Connection> clients_;
+            // Map client_id -> last seen UDP addr (filled on register)
+            std::unordered_map<uint32_t, sockaddr_in> udpClientAddrs_;
+
             uint32_t nextClientId_;
             std::string playerCmd_;
         };

@@ -654,6 +654,50 @@ void Server::handleUdpPacket(sock_t udpFd) {
             resp.flags = 0;
             resp.seq = hton_u32(seq);
             sendto(udpFd, (char*)&resp, (int)sizeof(resp), 0, (sockaddr*)&src, sl);
+
+            // store UDP addr for this client id so server can later forward commands to it
+            udpClientAddrs_[assigned] = src;
+            LOG_NET_INFO("Stored UDP addr for client_id={} -> {}", assigned, inet_ntoa(src.sin_addr));
+            break;
+        }
+        case CMD_SET_BITRATE: {
+            // payload expected to contain uint32_t kbps (network order).
+            if ((size_t)n < sizeof(hdr) + sizeof(uint32_t)) {
+                LOG_NET_WARN("CMD_SET_BITRATE with insufficient payload from {}", inet_ntoa(src.sin_addr));
+                break;
+            }
+            uint32_t net_kbps;
+            memcpy(&net_kbps, buf + sizeof(hdr), sizeof(uint32_t));
+            uint32_t kbps = ntohl(net_kbps);
+            uint32_t target_id = client_id;
+
+            if (target_id == 0) {
+                // broadcast to all known clients
+                LOG_NET_INFO("Forwarding SET_BITRATE={} kbps to ALL clients", kbps);
+                for (const auto &kv : udpClientAddrs_) {
+                    const sockaddr_in &dst = kv.second;
+                    // forward original payload (hdr+payload)
+                    int sent = sendto(udpFd, buf, n, 0, (sockaddr*)&dst, sizeof(dst));
+                    if (sent <= 0) {
+                        LOG_NET_WARN("Failed to forward SET_BITRATE to client_id={} addr={}", kv.first, inet_ntoa(dst.sin_addr));
+                    } else {
+                        LOG_NET_INFO("Forwarded SET_BITRATE to client_id={} addr={}", kv.first, inet_ntoa(dst.sin_addr));
+                    }
+                }
+            } else {
+                auto it = udpClientAddrs_.find(target_id);
+                if (it == udpClientAddrs_.end()) {
+                    LOG_NET_WARN("SET_BITRATE target client_id={} not found", target_id);
+                } else {
+                    const sockaddr_in &dst = it->second;
+                    int sent = sendto(udpFd, buf, n, 0, (sockaddr*)&dst, sizeof(dst));
+                    if (sent <= 0) {
+                        LOG_NET_WARN("Failed to forward SET_BITRATE to client_id={} addr={}", target_id, inet_ntoa(dst.sin_addr));
+                    } else {
+                        LOG_NET_INFO("Forwarded SET_BITRATE to client_id={} addr={}", target_id, inet_ntoa(dst.sin_addr));
+                    }
+                }
+            }
             break;
         }
         case CMD_HEARTBEAT:
