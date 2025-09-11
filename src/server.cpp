@@ -19,6 +19,7 @@
 #ifdef _WIN32
     #include <winsock2.h>
     #include <ws2tcpip.h>
+    #include <windows.h>
   #endif
 #endif
 
@@ -77,6 +78,7 @@ Server::Server(int tcpPort, const std::string &playerCmd)
         : tcpPort_(tcpPort),
           udpPort_(tcpPort + 1),
           listenSocket_(INVALID_SOCK),
+          udpSocket_(INVALID_SOCK),
           nextClientId_(1),
           playerCmd_(playerCmd)
 #ifdef __linux__
@@ -90,12 +92,22 @@ Server::~Server() {
     if (epollFd_ >= 0) close(epollFd_);
 #endif
     if (listenSocket_ != INVALID_SOCK) closeSocket(listenSocket_);
+    if (udpSocket_ != INVALID_SOCK) closeSocket(udpSocket_);
 #ifdef _WIN32
     WSACleanup();
 #endif
 }
 
 bool Server::setupListenSocket() {
+#ifdef _WIN32
+    // Initialize Winsock — must be done before socket() on Windows
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2,2), &wsa) != 0) {
+        LOG_GEN_ERROR("WSAStartup failed");
+        return false;
+    }
+#endif
+
     listenSocket_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listenSocket_ == INVALID_SOCK) {
         LOG_GEN_ERROR("Failed to create listen socket");
@@ -103,7 +115,11 @@ bool Server::setupListenSocket() {
     }
 
     int opt = 1;
+#ifdef _WIN32
+    setsockopt(listenSocket_, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+#else
     setsockopt(listenSocket_, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
+#endif
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -150,19 +166,37 @@ bool Server::start() {
     }
 
     // UDP for control
-    sock_t udpFd = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (udpFd == INVALID_SOCK) { perror("udp socket"); return false; }
+    udpSocket_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (udpSocket_ == INVALID_SOCK) { perror("udp socket"); return false; }
     sockaddr_in uaddr{};
     uaddr.sin_family = AF_INET;
     uaddr.sin_addr.s_addr = INADDR_ANY;
     uaddr.sin_port = htons(udpPort_);
-    if (bind(udpFd, (sockaddr*)&uaddr, sizeof(uaddr)) < 0) { perror("udp bind"); closeSocket(udpFd); return false; }
-    setSocketNonBlocking(udpFd);
+    if (bind(udpSocket_, (sockaddr*)&uaddr, sizeof(uaddr)) < 0) { perror("udp bind"); closeSocket(udpSocket_); return false; }
+    setSocketNonBlocking(udpSocket_);
     ev.events = EPOLLIN;
-    ev.data.fd = udpFd;
-    if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, udpFd, &ev) < 0) { perror("epoll_ctl add udp"); closeSocket(udpFd); return false; }
+    ev.data.fd = udpSocket_;
+    if (epoll_ctl(epollFd_, EPOLL_CTL_ADD, udpSocket_, &ev) < 0) { perror("epoll_ctl add udp"); closeSocket(udpSocket_); return false; }
     LOG_GEN_INFO("UDP listening on port {}", udpPort_);
 #else
+    // Windows: create UDP socket here as well, keep as member udpSocket_
+    udpSocket_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (udpSocket_ == INVALID_SOCK) {
+        LOG_GEN_ERROR("Failed to create UDP socket on Windows");
+        return false;
+    }
+    sockaddr_in uaddr{};
+    uaddr.sin_family = AF_INET;
+    uaddr.sin_addr.s_addr = INADDR_ANY;
+    uaddr.sin_port = htons(udpPort_);
+    if (bind(udpSocket_, (sockaddr*)&uaddr, sizeof(uaddr)) == SOCKET_ERROR) {
+        LOG_GEN_ERROR("UDP bind failed on Windows");
+        closeSocket(udpSocket_);
+        udpSocket_ = INVALID_SOCK;
+        return false;
+    }
+    setSocketNonBlocking(udpSocket_);
+    LOG_GEN_INFO("UDP listening on port {}", udpPort_);
     LOG_GEN_INFO("Using WSAPoll loop on Windows");
 #endif
 
@@ -193,31 +227,21 @@ void Server::runLoop() {
                 } else {
                     if (clients_.count(fd)) {
                         handleClientEvent(fd, ev);
-                    } else {
-                        handleUdpPacket(fd);
+                    } else if (fd == udpSocket_) {
+                        handleUdpPacket(udpSocket_);
                     }
                 }
             }
         }
+
+        // Process frame queues and flush player buffers for all clients regularly
+        for (auto &kv : clients_) {
+            processFrameQueue(kv.second);
+            flushPlayerBuffer(kv.second);
+        }
     }
 #else
-    // Windows WSAPoll loop (not fully changed here)
-    sock_t udpFd = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (udpFd == INVALID_SOCKET) {
-        LOG_GEN_ERROR("Failed to create UDP socket");
-        return;
-    }
-    sockaddr_in uaddr{};
-    uaddr.sin_family = AF_INET;
-    uaddr.sin_addr.s_addr = INADDR_ANY;
-    uaddr.sin_port = htons(udpPort_);
-    if (bind(udpFd, (sockaddr*)&uaddr, sizeof(uaddr)) == SOCKET_ERROR) {
-        LOG_GEN_ERROR("UDP bind failed");
-        closeSocket(udpFd);
-        return;
-    }
-    setSocketNonBlocking(udpFd);
-
+    // Windows WSAPoll loop
     while (true) {
         std::vector<WSAPOLLFD> fds;
         WSAPOLLFD lfd{};
@@ -226,10 +250,11 @@ void Server::runLoop() {
         fds.push_back(lfd);
 
         WSAPOLLFD ufd{};
-        ufd.fd = udpFd;
+        ufd.fd = udpSocket_;
         ufd.events = POLLIN;
         fds.push_back(ufd);
 
+        // Add clients to pollset
         for (auto &kv : clients_) {
             WSAPOLLFD cfd{};
             cfd.fd = kv.first;
@@ -237,23 +262,48 @@ void Server::runLoop() {
             fds.push_back(cfd);
         }
 
-        int ret = WSAPoll(fds.data(), (ULONG)fds.size(), 1000);
+        int timeoutMs = 100; // shorter timeout to frequently service playback
+        int ret = WSAPoll(fds.data(), (ULONG)fds.size(), timeoutMs);
         if (ret == SOCKET_ERROR) {
             LOG_GEN_ERROR("WSAPoll failed");
             break;
         }
-        if (ret == 0) continue;
+        if (ret == 0) {
+            // timeout -> we still must drive playback
+        } else {
+            // index 0 = listenSocket, 1 = udpSocket, rest = clients in same iteration order
+            if (!fds.empty()) {
+                if (fds[0].revents & POLLIN) acceptNewConnections();
+                if (fds.size() > 1 && (fds[1].revents & POLLIN)) handleUdpPacket(udpSocket_);
+            }
 
-        if (fds[0].revents & POLLIN) acceptNewConnections();
-        if (fds[1].revents & POLLIN) handleUdpPacket(udpFd);
+            // client events start from index 2
+            size_t idx = 2;
+            for (auto &kv : clients_) {
+                if (idx >= fds.size()) break;
+                WSAPOLLFD &cfd = fds[idx++];
+                if (cfd.revents & POLLIN) {
+                    handleClientEvent(kv.first, cfd.revents);
+                }
+                // if there are errors, mark closing
+                if (cfd.revents & (POLLERR | POLLHUP)) {
+                    kv.second.state = State::CLOSING;
+                    handleClientEvent(kv.first, cfd.revents);
+                }
+            }
+        }
 
-        for (size_t i = 2; i < fds.size(); ++i) {
-            sock_t fd = fds[i].fd;
-            uint32_t re = fds[i].revents;
-            if (clients_.count(fd)) handleClientEvent(fd, re);
+        // Always process frame queues AND flush buffers for all clients (important for timing)
+        for (auto &kv : clients_) {
+            processFrameQueue(kv.second);
+            flushPlayerBuffer(kv.second);
+            if (kv.second.state == State::CLOSING) {
+                closeConnection(kv.first);
+                // iterator invalidation: break and restart loop in next iteration
+                break;
+            }
         }
     }
-    closeSocket(udpFd);
 #endif
 }
 
@@ -267,6 +317,7 @@ void Server::acceptNewConnections() {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             perror("accept");
 #else
+            // On Windows, no more pending connections
             break;
 #endif
         } else {
@@ -420,7 +471,7 @@ void Server::handleClientEvent(sock_t fd, uint32_t events) {
                                             conn.clientId, frame.pts, frame.is_keyframe, frame.data.size());
                         } // parsing loop
 
-                        // Process frame queue
+                        // Process frame queue (we also call processFrameQueue globally after event loop)
                         processFrameQueue(conn);
                     } else if (n == 0) {
                         LOG_NET_INFO("peer closed connection fd={}", (long long)fd);
@@ -445,7 +496,7 @@ void Server::handleClientEvent(sock_t fd, uint32_t events) {
             // placeholder
             break;
         case State::WRITING:
-            // handled by player fd events
+            // handled by player fd events (linux)
             break;
         case State::CLOSING:
             closeConnection(fd);

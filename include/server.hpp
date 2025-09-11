@@ -90,6 +90,7 @@ namespace project {
             int tcpPort_;
             int udpPort_;
             sock_t listenSocket_;
+            sock_t udpSocket_; // stored UDP socket for both platforms
 #ifdef __linux__
             int epollFd_;
             std::unordered_map<int, sock_t> playerFdToClientFd_;
