@@ -1,38 +1,59 @@
-# Protocol
+# Protocol — overview
 
-Two channels:
-- TCP stream: used for transporting FEC packets (header + payload).
-- UDP control: used for register/heartbeat/broadcast (lightweight control).
+Система использует два канала коммуникации:
 
-## UDP header (control)
+* **TCP** — транспорт для приложений/видео (FEC-пакеты). Надёжный, упорядоченный канал.
+* **UDP** — лёгкий контрольный канал (регистрация, heartbeat, broadcast).
 
-```cpp
-struct UdpHeader {
-uint32_t client_id;
-uint16_t command_id; // CMD_REGISTER, CMD_HEARTBEAT, etc.
-uint16_t flags;
-uint32_t seq;
-};
-```
+Развернутая спецификация по заголовкам — в `[WireFormat]`.
 
-## FEC packet format (TCP)
-Each TCP message is framed as:
+---
 
-`[FecPacketHeader (network order)] [encoded_payload bytes]`
+## 1) Сценарий установки соединения (high-level)
 
-where `FecPacketHeader` contains:
+1. Клиент запускается и открывает:
+    * TCP соединение к серверу (порт `tcpPort`).
+    * UDP сокет к `udpPort = tcpPort + 1`.
+2. Клиент шлёт UDP `CMD_REGISTER` с `client_id=0`, `seq=...`.
+3. Сервер отвечает `CMD_REGISTER_RESP`, указывая `client_id` (uint32).
+4. Клиент продолжает отправлять FEC-пакеты по TCP, подставляя присвоенный `client_id` в заголовках.
 
-```cpp
-struct FecPacketHeader {
-uint32_t client_id; // client id
-uint32_t packet_seq; // packet monotonic number
-uint16_t fec_k; // data symbols count
-uint16_t fec_m; // parity symbols count
-uint16_t flags; // reserved
-uint32_t payload_len; // length of encoded payload
-};
-```
+---
 
-Currently `encoded_payload` == original payload (stub). In the future will contain rscoder output.
+## 2) Пакетирование видео
 
+* Клиент:
+    1. Прочитывает NAL-блок из Annex-B H.264 (включая старт-код `00 00 01` / `00 00 00 01`).
+    2. Вызывает `encoder.encode_with_header(client_id, packet_seq, fec_k, fec_m, flags, pts, nal.data(), nal.size())`.
+    3. Отправляет возвращённый вектор байт по TCP: `[header|encoded_payload]`.
+* Сервер:
+    1. Буферизует входящие байты в `conn.inBuffer`.
+    2. Пока в буфере есть хотя бы `FEC_PACKET_HEADER_SIZE` (26 байт) — парсит заголовок.
+    3. Если в буфере есть полная пачка `header + payload_len` — извлекает пакет, вызывает `decoder.decode_packet`.
+    4. Полученный `pkt.payload` (Annex-B bytes после декодирования) анализируется на наличие SPS/PPS/IDR; формируется `VideoFrame` и помещается в `frame_queue`.
+    5. `processFrameQueue` отправляет кадры в `player->write_data(...)` синхронизированно (по PTS).
 
+**Примечание о PTS/timebase:** PTS в миллисекундах. Сервер использует wallclock стартового времени `start_time` и PTS относительно `first_pts` для упорядочивания/плейбека.
+
+---
+
+## 3) Контрольная логика UDP
+
+* `CMD_REGISTER` — начальная регистрация; сервер назначает id.
+* `CMD_HEARTBEAT` — keep-alive/health (не обязателен, но полезен для детектирования мёртвых клиентов).
+* `CMD_BROADCAST` — отправка данных всем клиентам (сервер републикует в `playerBuffer`).
+
+---
+
+## 4) Поведение при ошибках / защита
+
+* Всегда проверять `payload_len` — не принимать пакеты, где `payload_len` явно слишком велик (ограничение конфигурации `MAX_PLAYER_BUFFER_HARD` и т.п.).
+* Необходимо корректно обрабатывать неполные TCP reads: `conn.inBuffer` аккумулирует байты.
+* `decode_packet` должен логировать hexdump **первых N байт** при ошибках декодирования — это добавлено в логирование (см. QoS_and_Logging).
+
+---
+
+## 5) Рекомендации по совместимости
+
+* Если меняете формат `encoded_payload` — увеличьте `flags` version и задокументируйте изменения. Иначе старые клиенты/серверы перестанут понимать друг друга.
+* Для масштабируемости подумайте о сегментации: использовать UDP для передачи большинства фактических FEC фрагментов (если вам нужна низкая латентность и контроль потока), но это усложнит порядок/потери.

@@ -1,10 +1,13 @@
 # Project Wiki - Home
 
-This lightweight wiki describes the project's design, protocol, and how to replace the stub FEC encoder
-with a real Reed–Solomon implementation (example: `zachbabanov/rscoder`).
+Добро пожаловать в вики проекта. Здесь собрана документация по архитектуре, протоколам, замене заглушки FEC на реальную реализацию (rscoder), инструкции по сборке и рекомендации по отладке и метрикам.
 
-Sections:
-- Architecture.md — overall component architecture.
-- Protocol.md — wire protocol including UDP control header and FEC packet header.
-- ReplacingStubWithRscoder.md — step-by-step guide to integrating `rscoder`.
-- QoS_and_Logging.md — details about collected QoS metrics and where to find them in logs.
+**Содержание:**
+- [Architecture](Architecture) — компонентная архитектура и модель соединений (FSM).
+- [Wire format / Headers](WireFormat) — подробная спецификация заголовков (RFC/IP-стиль), байтовые смещения, примеры hex.
+- [Protocol](Protocol) — общий протокол взаимодействия (TCP/UDP) и поведение клиента/сервера.
+- [ReplacingStubWithRscoder](ReplacingStubWithRscoder) — пошаговое руководство по интеграции `rscoder` (реальный Reed–Solomon).
+- [QoS and Logging](QoS_and_Logging) — какие метрики логируются, как вычислять latency/throughput/overhead.
+- [Build](Build) — инструкции по сборке проекта (CMake, FetchContent, fmt, rscoder).
+
+> Рекомендация: начните с `Architecture` и `WireFormat`, чтобы иметь общее представление о потоках данных и формате пакетов.
