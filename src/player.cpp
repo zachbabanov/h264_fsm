@@ -1,23 +1,25 @@
-#include "player.hpp"
-#include "common.hpp"
-#include "logger.hpp"
+/*
+* @license
+* (C) zachbabanov
+*
+*/
 
+#include <player.hpp>
+#include <common.hpp>
+#include <logger.hpp>
+
+#include <cstring>
 #include <vector>
 #include <thread>
-#include <mutex>
-#include <condition_variable>
 #include <deque>
-#include <atomic>
-#include <iostream>
-#include <cstring>
 
 #ifdef __linux__
-  #include <sys/types.h>
-  #include <sys/wait.h>
-  #include <unistd.h>
-  #include <fcntl.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <fcntl.h>
 #else
-  #include <windows.h>
+#include <windows.h>
 #endif
 
 using namespace project::player;

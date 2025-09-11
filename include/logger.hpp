@@ -1,14 +1,20 @@
+/*
+* @license
+* (C) zachbabanov
+*
+*/
+
 #ifndef PROJECT_LOGGER_HPP
 #define PROJECT_LOGGER_HPP
 
 #pragma once
 
-#include <string>
-#include <mutex>
-#include <chrono>
 #include <iomanip>
 #include <fstream>
+#include <string>
+#include <chrono>
 #include <atomic>
+#include <mutex>
 #include <ctime>
 
 #include <fmt/core.h>

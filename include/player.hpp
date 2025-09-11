@@ -1,9 +1,16 @@
+/*
+* @license
+* (C) zachbabanov
+*
+*/
+
 #ifndef PROJECT_PLAYER_HPP
 #define PROJECT_PLAYER_HPP
 
 #pragma once
 
-#include "common.hpp"
+#include <common.hpp>
+
 #include <string>
 #include <vector>
 #include <memory>

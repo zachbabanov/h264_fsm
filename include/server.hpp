@@ -1,16 +1,24 @@
+/*
+* @license
+* (C) zachbabanov
+*
+*/
+
 #ifndef PROJECT_SERVER_HPP
 #define PROJECT_SERVER_HPP
 
 #pragma once
 
-#include "common.hpp"
-#include "player.hpp"
-#include <string>
+#include <common.hpp>
+#include <player.hpp>
+
 #include <unordered_map>
+#include <string>
 #include <vector>
 #include <memory>
-#include <queue>
 #include <chrono>
+#include <queue>
+
 #include <netinet/in.h>
 
 namespace project {

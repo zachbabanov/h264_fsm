@@ -1,26 +1,31 @@
-#include "server.hpp"
-#include "common.hpp"
-#include "encoder.hpp"
-#include "logger.hpp"
-#include <cerrno>
-#include <cstring>
-#include <iostream>
+/*
+* @license
+* (C) zachbabanov
+*
+*/
+
+#include <server.hpp>
+#include <common.hpp>
+#include <encoder.hpp>
+#include <logger.hpp>
+
 #include <algorithm>
+#include <cstring>
+#include <cerrno>
 #include <chrono>
 
 #ifdef __linux__
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <sys/epoll.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/epoll.h>
 #include <unistd.h>
 #else
 #ifdef _WIN32
-    #include <winsock2.h>
-    #include <ws2tcpip.h>
-    #include <windows.h>
-  #endif
+ #include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#endif
 #endif
 
 using namespace project::server;

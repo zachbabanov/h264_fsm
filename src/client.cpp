@@ -1,25 +1,30 @@
-#include "client.hpp"
-#include "common.hpp"
-#include "encoder.hpp" // StubFec
-#include "logger.hpp"
-#include <fstream>
+/*
+* @license
+* (C) zachbabanov
+*
+*/
+
+#include <client.hpp>
+#include <common.hpp>
+#include <encoder.hpp>
+#include <logger.hpp>
+
 #include <iostream>
+#include <fstream>
+#include <cstring>
 #include <vector>
 #include <chrono>
 #include <thread>
-#include <cstring>
 #include <atomic>
 
 #ifdef __linux__
+#include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <fcntl.h>
 #else
 #include <winsock2.h>
-  #include <ws2tcpip.h>
+#include <ws2tcpip.h>
 #endif
 
 using namespace project::client;

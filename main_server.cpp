@@ -1,5 +1,12 @@
-#include "server.hpp"
-#include "logger.hpp"
+/*
+* @license
+* (C) zachbabanov
+*
+*/
+
+#include <server.hpp>
+#include <logger.hpp>
+
 #include <iostream>
 
 /**

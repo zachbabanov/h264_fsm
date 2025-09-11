@@ -1,3 +1,9 @@
+/*
+* @license
+* (C) zachbabanov
+*
+*/
+
 #ifndef PROJECT_COMMON_HPP
 #define PROJECT_COMMON_HPP
 
@@ -8,7 +14,7 @@
 
 #ifdef _WIN32
 #include <winsock2.h>
-  #define INVALID_SOCK INVALID_SOCKET
+#define INVALID_SOCK INVALID_SOCKET
 #else
 #define INVALID_SOCK (-1)
 #endif

@@ -1,15 +1,22 @@
+/*
+* @license
+* (C) zachbabanov
+*
+*/
+
 #ifndef PROJECT_CLIENT_HPP
 #define PROJECT_CLIENT_HPP
 
 #pragma once
 
-#include "common.hpp"
+#include <common.hpp>
+
 #include <string>
 #include <vector>
 #include <atomic>
 #include <thread>
-#include <mutex>
 #include <chrono>
+#include <mutex>
 
 namespace project {
     namespace client {

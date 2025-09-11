@@ -1,9 +1,16 @@
-#include "client.hpp"
-#include "logger.hpp"
+/*
+* @license
+* (C) zachbabanov
+*
+*/
+
+#include <client.hpp>
+#include <logger.hpp>
+
 #include <iostream>
+#include <cstdlib>
 #include <string>
 #include <vector>
-#include <cstdlib>
 
 using namespace project::client;
 using namespace project::log;

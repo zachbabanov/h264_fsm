@@ -1,15 +1,21 @@
-#include "encoder.hpp"
-#include "logger.hpp"
-#include "common.hpp"
-#include <vector>
+/*
+* @license
+* (C) zachbabanov
+*
+*/
+
+#include <encoder.hpp>
+#include <logger.hpp>
+#include <common.hpp>
+
 #include <cstring>
 #include <cassert>
 #include <sstream>
 #include <iomanip>
+#include <vector>
 
-// rscoder header (from FetchContent)
-// Adjust include path if needed (CMake sets rscoder source dir in include path)
-#include "rs.hpp"
+// rscoder header
+#include <rs.hpp>
 
 using namespace project::fec;
 using namespace project::log;

@@ -1,17 +1,24 @@
-#include "common.hpp"
-#include "logger.hpp"
-#include <cerrno>
+/*
+* @license
+* (C) zachbabanov
+*
+*/
+
+#include <common.hpp>
+#include <logger.hpp>
+
 #include <cstring>
+#include <cerrno>
 
 #ifdef _WIN32
 #include <winsock2.h>
-  #include <ws2tcpip.h>
-  #include <io.h>
+#include <ws2tcpip.h>
+#include <io.h>
 #else
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <arpa/inet.h>
-#include <netinet/tcp.h>
 #endif
 
 namespace project {

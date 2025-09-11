@@ -1,7 +1,15 @@
-#include "logger.hpp"
-#include <fmt/core.h>
-#include <fmt/chrono.h>
+/*
+* @license
+* (C) zachbabanov
+*
+*/
+
+#include <logger.hpp>
+
 #include <cstring>
+
+#include <fmt/chrono.h>
+#include <fmt/core.h>
 
 namespace project::log {
 
