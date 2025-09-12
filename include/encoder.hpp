@@ -33,20 +33,31 @@ namespace project::fec {
  */
 #pragma pack(push,1)
     struct FecPacketHeader {
-        uint32_t client_id;   // client identifier
-        uint32_t packet_seq;  // packet sequence number
-        uint16_t fec_k;       // data symbols (for RS)
-        uint16_t fec_m;       // parity symbols (for RS)
-        uint16_t flags;       // reserved flags
-        uint16_t fragments;   // number of fragments
-        uint32_t payload_len; // length of encoded payload bytes (fragments * FRAGMENT_SIZE)
-        uint32_t orig_len;    // original (raw) payload length in bytes
-        uint64_t pts;         // presentation timestamp in milliseconds
+        uint32_t client_id;
+        uint32_t packet_seq;
+        uint16_t fec_k;
+        uint16_t fec_m;
+        uint16_t flags;
+        uint64_t pts;
+        uint32_t payload_len;
     };
 #pragma pack(pop)
 
     constexpr size_t FEC_PACKET_HEADER_SIZE = sizeof(FecPacketHeader);
 
+#pragma pack(push,1)
+    struct FecDecodedPacket {
+        uint32_t client_id;
+        uint32_t packet_seq;
+        uint16_t fec_k;
+        uint16_t fec_m;
+        uint16_t flags;
+        uint64_t pts;
+        std::vector<char> payload;
+    };
+#pragma pack(pop)
+
+#pragma pack(push,1)
     struct FecPacket {
         uint32_t client_id;
         uint32_t packet_seq;
@@ -58,6 +69,7 @@ namespace project::fec {
         uint64_t pts;
         std::vector<char> payload; // decoded payload (after decode())
     };
+#pragma pack(pop)
 
 /**
  * @brief StubFec provides a future-compatible API for Reed-Solomon coder (rscoder).
@@ -77,20 +89,18 @@ namespace project::fec {
         StubFec() = default;
         ~StubFec() = default;
 
-        std::vector<char> encode_with_header(uint32_t client_id,
-                                             uint32_t packet_seq,
-                                             uint16_t fec_k,
-                                             uint16_t fec_m,
-                                             uint16_t flags,
-                                             uint64_t pts,
-                                             const char *data,
-                                             size_t len);
+        static std::vector<char> encode_with_header(uint32_t client_id,
+                                                    uint32_t packet_seq,
+                                                    uint16_t fec_k,
+                                                    uint16_t fec_m,
+                                                    uint16_t flags,
+                                                    uint64_t pts,
+                                                    const char* payload,
+                                                    size_t payload_len);
 
-        static FecPacketHeader parse_header(const char *hdr_bytes, size_t hdr_len);
+        static FecPacketHeader parse_header(const char* data, size_t len);
 
-        std::vector<char> decode_payload(const char *data, size_t len, uint16_t fragments, uint32_t orig_len);
-
-        FecPacket decode_packet(const char *packet_bytes, size_t packet_len);
+        static FecDecodedPacket decode_packet(const char* data, size_t len);
     };
 
 } // namespace project::fec

@@ -4,9 +4,9 @@
 *
 */
 
+#include <encoder.hpp>
 #include <client.hpp>
 #include <common.hpp>
-#include <encoder.hpp>
 #include <logger.hpp>
 
 #include <iostream>
@@ -22,6 +22,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <poll.h>
+#include <unistd.h>
 #else
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -36,11 +37,11 @@ Client::Client(const std::string &host, int port, const std::string &h264File, b
         : host_(host), tcpPort_(port), udpPort_(port + 1), h264File_(h264File), loop_(loop),
           clientId_(0), packetSeq_(1),
           bitrate_kbps_(0), tokens_(0.0), last_fill_(std::chrono::steady_clock::now()),
-          stop_udp_listener_(false)
+          stop_tcp_listener_(false)
 {}
 
 Client::~Client() {
-    stopUdpListener();
+    stopTcpListener();
 }
 
 void Client::set_initial_bitrate(uint32_t kbps) {
@@ -62,6 +63,7 @@ bool Client::initAndConnect(sock_t &outTcpSock, sock_t &outUdpSock) {
     }
 #endif
 
+    // Create TCP socket for commands
     addrinfo hints{};
     addrinfo *res = nullptr;
     hints.ai_family = AF_INET;
@@ -72,15 +74,15 @@ bool Client::initAndConnect(sock_t &outTcpSock, sock_t &outUdpSock) {
         return false;
     }
 
-    sock_t sock = INVALID_SOCK;
+    sock_t tcpSock = INVALID_SOCK;
     for (addrinfo *rp = res; rp; rp = rp->ai_next) {
-        sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-        if (sock == INVALID_SOCK) continue;
+        tcpSock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (tcpSock == INVALID_SOCK) continue;
 
-        setSocketNonBlocking(sock);
-        enableSocketKeepAliveAndNoDelay(sock);
+        setSocketNonBlocking(tcpSock);
+        enableSocketKeepAliveAndNoDelay(tcpSock);
 
-        int r = connect(sock, rp->ai_addr, (int)rp->ai_addrlen);
+        int r = connect(tcpSock, rp->ai_addr, (int)rp->ai_addrlen);
         if (r == 0) {
             break;
         } else {
@@ -91,32 +93,27 @@ bool Client::initAndConnect(sock_t &outTcpSock, sock_t &outUdpSock) {
             if (errno == EINPROGRESS) break;
 #endif
         }
-        closeSocket(sock);
-        sock = INVALID_SOCK;
+        closeSocket(tcpSock);
+        tcpSock = INVALID_SOCK;
     }
     freeaddrinfo(res);
-    if (sock == INVALID_SOCK) {
+    if (tcpSock == INVALID_SOCK) {
         LOG_GEN_ERROR("Failed to create/connect TCP socket");
         return false;
     }
-    outTcpSock = sock;
+    outTcpSock = tcpSock;
     LOG_NET_INFO("TCP socket initialized to {}:{}", host_, tcpPort_);
 
-    // Create UDP socket and bind to ephemeral local port so we can receive commands
+    // Create UDP socket for video
     sock_t udp = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (udp == INVALID_SOCK) {
         LOG_GEN_ERROR("UDP socket creation failed");
         return false;
     }
 
-    sockaddr_in bindaddr{};
-    bindaddr.sin_family = AF_INET;
-    bindaddr.sin_addr.s_addr = INADDR_ANY;
-    bindaddr.sin_port = htons(0); // ephemeral
-    if (bind(udp, (sockaddr*)&bindaddr, sizeof(bindaddr)) < 0) {
-        LOG_NET_INFO("UDP bind failed (will still try) errno={}", errno);
-        // Not fatal — continue
-    }
+    // Increase UDP buffer sizes (best-effort)
+    int rcvbuf = 4 * 1024 * 1024;
+    setsockopt(udp, SOL_SOCKET, SO_RCVBUF, (char*)&rcvbuf, sizeof(rcvbuf));
 
     setSocketNonBlocking(udp);
     outUdpSock = udp;
@@ -127,39 +124,46 @@ void Client::closeSocketLocal(sock_t s) {
     closeSocket(s);
 }
 
-bool Client::sendUdpRegister(sock_t udpSock, uint32_t seq) {
-    sockaddr_in dst{};
-    dst.sin_family = AF_INET;
-    inet_pton(AF_INET, host_.c_str(), &dst.sin_addr);
-    dst.sin_port = htons(udpPort_);
-
+bool Client::sendTcpRegister(sock_t tcpSock, uint32_t seq) {
     UdpHeader hdr{};
     hdr.client_id = hton_u32(0);
     hdr.command_id = hton_u16(CMD_REGISTER);
     hdr.flags = 0;
     hdr.seq = hton_u32(seq);
 
-    int rc = sendto(udpSock, (char*)&hdr, (int)sizeof(hdr), 0, (sockaddr*)&dst, sizeof(dst));
-    if (rc < 0) {
-        LOG_NET_INFO("sendto register failed");
-        return false;
+    // send fully (small message)
+    ssize_t total = 0;
+    const char *buf = (const char*)&hdr;
+    size_t tosend = sizeof(hdr);
+    while (total < (ssize_t)tosend) {
+        ssize_t n = send(tcpSock, buf + total, (int)(tosend - total), 0);
+        if (n <= 0) {
+#ifdef __linux__
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                pollfd pfd{tcpSock, POLLOUT, 0};
+                poll(&pfd, 1, 1000);
+                continue;
+            }
+#endif
+            LOG_NET_INFO("send register failed");
+            return false;
+        }
+        total += n;
     }
-    LOG_NET_INFO("UDP register sent seq={}", seq);
+    LOG_NET_INFO("TCP register sent seq={}", seq);
     return true;
 }
 
-bool Client::receiveUdpRegisterResp(sock_t udpSock, uint32_t &assigned, int timeoutMs) {
+bool Client::receiveTcpRegisterResp(sock_t tcpSock, uint32_t &assigned, int timeoutMs) {
 #ifdef __linux__
     pollfd pfd{};
-    pfd.fd = udpSock;
+    pfd.fd = tcpSock;
     pfd.events = POLLIN;
     int r = poll(&pfd, 1, timeoutMs);
     if (r <= 0) return false;
     if (pfd.revents & POLLIN) {
         char buf[512];
-        sockaddr_in src{};
-        socklen_t sl = sizeof(src);
-        int n = recvfrom(udpSock, buf, sizeof(buf), 0, (sockaddr*)&src, &sl);
+        int n = recv(tcpSock, buf, sizeof(buf), 0);
         if (n >= (int)sizeof(UdpHeader)) {
             UdpHeader resp;
             memcpy(&resp, buf, sizeof(resp));
@@ -173,17 +177,15 @@ bool Client::receiveUdpRegisterResp(sock_t udpSock, uint32_t &assigned, int time
 #else
     fd_set rfds;
     FD_ZERO(&rfds);
-    FD_SET(udpSock, &rfds);
+    FD_SET(tcpSock, &rfds);
     timeval tv{};
     tv.tv_sec = timeoutMs / 1000;
     tv.tv_usec = (timeoutMs % 1000) * 1000;
-    int r = select((int)(udpSock + 1), &rfds, nullptr, nullptr, &tv);
+    int r = select((int)(tcpSock + 1), &rfds, nullptr, nullptr, &tv);
     if (r <= 0) return false;
-    if (FD_ISSET(udpSock, &rfds)) {
+    if (FD_ISSET(tcpSock, &rfds)) {
         char buf[512];
-        sockaddr_in src{};
-        int sl = sizeof(src);
-        int n = recvfrom(udpSock, buf, sizeof(buf), 0, (sockaddr*)&src, &sl);
+        int n = recv(tcpSock, buf, sizeof(buf), 0);
         if (n >= (int)sizeof(UdpHeader)) {
             UdpHeader resp;
             memcpy(&resp, buf, sizeof(resp));
@@ -251,41 +253,45 @@ std::vector<std::vector<char>> Client::extractAnnexBNals(const std::vector<char>
     return nals;
 }
 
-void Client::startUdpListener(project::common::sock_t udpSock) {
-    stop_udp_listener_.store(false);
-    udp_listener_thread_ = std::thread([this, udpSock]() { udpListenerLoop(udpSock); });
+void Client::startTcpListener(project::common::sock_t tcpSock) {
+    stop_tcp_listener_.store(false);
+    tcp_listener_thread_ = std::thread([this, tcpSock]() { tcpListenerLoop(tcpSock); });
 }
 
-void Client::stopUdpListener() {
-    stop_udp_listener_.store(true);
-    if (udp_listener_thread_.joinable()) udp_listener_thread_.join();
+void Client::stopTcpListener() {
+    stop_tcp_listener_.store(true);
+    if (tcp_listener_thread_.joinable()) tcp_listener_thread_.join();
 }
 
-void Client::udpListenerLoop(project::common::sock_t udpSock) {
-    LOG_GEN_INFO("UDP listener thread started for client (fd={})", (long long)udpSock);
-    while (!stop_udp_listener_.load()) {
+void Client::tcpListenerLoop(project::common::sock_t tcpSock) {
+    LOG_GEN_INFO("TCP listener thread started for client (fd={})", (long long)tcpSock);
+    while (!stop_tcp_listener_.load()) {
         char buf[512];
-        sockaddr_in src{};
-        socklen_t sl = sizeof(src);
 #ifdef __linux__
         pollfd pfd{};
-        pfd.fd = udpSock;
+        pfd.fd = tcpSock;
         pfd.events = POLLIN;
         int pret = poll(&pfd, 1, 200);
         if (pret <= 0) continue;
-        int n = recvfrom(udpSock, buf, sizeof(buf), 0, (sockaddr*)&src, &sl);
+        int n = recv(tcpSock, buf, sizeof(buf), 0);
 #else
         fd_set rfds;
         FD_ZERO(&rfds);
-        FD_SET(udpSock, &rfds);
+        FD_SET(tcpSock, &rfds);
         timeval tv{};
         tv.tv_sec = 0;
         tv.tv_usec = 200000; // 200ms
-        int r = select((int)(udpSock + 1), &rfds, nullptr, nullptr, &tv);
+        int r = select((int)(tcpSock + 1), &rfds, nullptr, nullptr, &tv);
         if (r <= 0) continue;
-        int n = recvfrom(udpSock, buf, sizeof(buf), 0, (sockaddr*)&src, &sl);
+        int n = recv(tcpSock, buf, sizeof(buf), 0);
 #endif
-        if (n <= 0) continue;
+        if (n <= 0) {
+            if (n == 0) {
+                LOG_NET_INFO("TCP connection closed by server");
+                stop_tcp_listener_.store(true);
+            }
+            continue;
+        }
         if ((size_t)n < sizeof(UdpHeader)) continue;
         UdpHeader hdr;
         memcpy(&hdr, buf, sizeof(hdr));
@@ -303,7 +309,7 @@ void Client::udpListenerLoop(project::common::sock_t udpSock) {
                     tokens_ = 0.0;
                     last_fill_ = std::chrono::steady_clock::now();
                 }
-                LOG_FEC_INFO("Received CMD_SET_BITRATE from {}: set bitrate={} kbps", inet_ntoa(src.sin_addr), kbps);
+                LOG_FEC_INFO("Received CMD_SET_BITRATE from server: set bitrate={} kbps", kbps);
             } else {
                 LOG_FEC_WARN("Received CMD_SET_BITRATE with empty payload");
             }
@@ -311,10 +317,10 @@ void Client::udpListenerLoop(project::common::sock_t udpSock) {
             // ignore (handled elsewhere)
         } else {
             // ignore other commands
-            LOG_NET_INFO("UDP listener got unknown cmd={}", ntoh_u16(hdr.command_id));
+            LOG_NET_INFO("TCP listener got unknown cmd={}", ntoh_u16(hdr.command_id));
         }
     }
-    LOG_GEN_INFO("UDP listener thread exiting");
+    LOG_GEN_INFO("TCP listener thread exiting");
 }
 
 /**
@@ -347,10 +353,10 @@ void Client::pace_before_send(size_t bytes) {
     double wait_sec = need / rate_bytes_per_sec;
     if (wait_sec < 0) wait_sec = 0;
     // Sleep in small chunks to keep responsive to possible bitrate changes
-    const double sleep_chunk = 0.01; // 10ms
+    const double sleep_chunk = 0.001; // 1ms
     double slept = 0.0;
     while (slept < wait_sec) {
-        if (stop_udp_listener_.load()) break;
+        if (stop_tcp_listener_.load()) break;
         double to_sleep = std::min(sleep_chunk, wait_sec - slept);
 #ifdef __linux__
         std::this_thread::sleep_for(std::chrono::duration<double>(to_sleep));
@@ -382,7 +388,7 @@ void Client::pace_before_send(size_t bytes) {
     }
 }
 
-bool Client::tcpStreamRun(sock_t sock) {
+bool Client::udpStreamRun(sock_t udpSock) {
     // Read entire file into memory (simpler and robust for test streams).
     std::ifstream infile(h264File_, std::ios::binary);
     if (!infile.is_open()) {
@@ -408,55 +414,24 @@ bool Client::tcpStreamRun(sock_t sock) {
     }
     LOG_GEN_INFO("Extracted {} NAL units from {}", nals.size(), h264File_);
 
-    // Ensure connection established (wait for connect completion on non-blocking socket)
-#ifdef __linux__
-    pollfd pfd{};
-    pfd.fd = sock;
-    pfd.events = POLLOUT;
-    int pret = poll(&pfd, 1, 5000);
-    if (pret <= 0) {
-        LOG_GEN_ERROR("connect timeout or error");
-        return false;
-    } else {
-        int err = 0; socklen_t len = sizeof(err);
-        getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)&err, &len);
-        if (err != 0) {
-            LOG_GEN_ERROR("connect failed err={}", err);
-            return false;
-        }
-    }
-#else
-    // Windows - use select to check connection status
-    fd_set writefds;
-    FD_ZERO(&writefds);
-    FD_SET(sock, &writefds);
-    timeval timeout{};
-    timeout.tv_sec = 5;
-    timeout.tv_usec = 0;
-
-    int selret = select(0, NULL, &writefds, NULL, &timeout);
-    if (selret <= 0) {
-        LOG_GEN_ERROR("connect timeout or error");
-        return false;
-    } else {
-        int error = 0;
-        int error_size = sizeof(error);
-        if (getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)&error, &error_size) != 0 || error != 0) {
-            LOG_GEN_ERROR("connect failed err={}", error);
-            return false;
-        }
-    }
-#endif
-
-    LOG_GEN_INFO("Connected to server {}:{}", host_, tcpPort_);
+    // Set up server address for UDP
+    sockaddr_in serverAddr{};
+    serverAddr.sin_family = AF_INET;
+    inet_pton(AF_INET, host_.c_str(), &serverAddr.sin_addr);
+    serverAddr.sin_port = htons(udpPort_);
 
     StubFec encoder;
+
+    // Max payload per UDP fragment (leave room for our fragment header)
+    const size_t frag_hdr_size = sizeof(common::UdpVideoFragmentHeader);
+    const size_t max_fragment_payload = (MAX_UDP_PACKET_SIZE > frag_hdr_size) ? (MAX_UDP_PACKET_SIZE - frag_hdr_size) : 256;
 
     // Send NAL units in order; if loop_ is true, repeat indefinitely.
     do {
         for (size_t i = 0; i < nals.size(); ++i) {
-            const auto &nal = nals[i];
-            // Determine nal type for pts (we keep previous logic)
+            auto nal = nals[i]; // copy, because we might resize it
+
+            // Determine nal type for pts
             size_t sc_len = 0;
             if (nal.size() >= 4 && (unsigned char)nal[0] == 0x00 && (unsigned char)nal[1] == 0x00 &&
                 (unsigned char)nal[2] == 0x00 && (unsigned char)nal[3] == 0x01) {
@@ -480,62 +455,106 @@ bool Client::tcpStreamRun(sock_t sock) {
             uint64_t pts = frame_count * 40;
             if (is_vcl) frame_count++;
 
+            // For now pick modest fec params; encoder can decide actual encoded length
             uint16_t fec_k = 10;
             uint16_t fec_m = 2;
             uint16_t flags = 0;
+
             auto packet = encoder.encode_with_header(clientId_, packetSeq_++, fec_k, fec_m, flags,
                                                      pts,
                                                      nal.data(), nal.size());
 
-            // Pacing: ensure we don't exceed requested bitrate
-            pace_before_send(packet.size());
-
-            // send robustly (handle EAGAIN)
-            size_t to_send = packet.size();
-            size_t sent = 0;
-            while (sent < to_send) {
-#ifdef __linux__
-                ssize_t n = send(sock, packet.data() + sent, (int)(to_send - sent), MSG_NOSIGNAL);
-                if (n < 0) {
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                        pollfd waitfd{};
-                        waitfd.fd = sock;
-                        waitfd.events = POLLOUT;
-                        if (poll(&waitfd, 1, 3000) <= 0) {
-                            LOG_NET_INFO("poll timeout during send");
-                            return false;
-                        }
-                        continue;
-                    } else {
-                        LOG_NET_INFO("send failed errno={}", errno);
-                        return false;
-                    }
-                }
-                sent += (size_t)n;
-#else
-                int n = send(sock, packet.data() + sent, (int)(to_send - sent), 0);
-                if (n == SOCKET_ERROR) {
-                    int err = WSAGetLastError();
-                    if (err == WSAEWOULDBLOCK) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                        continue;
-                    } else {
-                        LOG_NET_INFO("send failed err={}", err);
-                        return false;
-                    }
-                }
-                sent += (size_t)n;
-#endif
+            if (packet.empty()) {
+                LOG_FEC_ERROR("Encoder returned empty packet for nal idx {} size {}", i, nal.size());
+                continue;
             }
-            LOG_FEC_DEBUG("video_send: client_id={} seq={} nal_index={} nal_bytes={} nal_type={} pts={}",
-                          clientId_, packetSeq_-1, (unsigned)i, (uint32_t)nal.size(), nal_type, pts);
 
-            // Small delay between NAL units to prevent overwhelming the server
+            // Fragment the encoded packet into UDP datagrams with our fragment header
+            size_t total_len = packet.size();
+            if (total_len > MAX_UDP_REASSEMBLY_BYTES) {
+                LOG_FEC_WARN("Encoded packet too large ({} bytes) - skipping", total_len);
+                continue;
+            }
+
+            uint16_t total_frags = (uint16_t)((total_len + max_fragment_payload - 1) / max_fragment_payload);
+            if (total_frags == 0) total_frags = 1;
+
+            size_t offset = 0;
+            for (uint16_t frag_idx = 0; frag_idx < total_frags; ++frag_idx) {
+                size_t remaining = total_len - offset;
+                size_t this_payload = std::min(remaining, max_fragment_payload);
+
+                // Build fragment header
+                common::UdpVideoFragmentHeader vhdr{};
+                vhdr.client_id = hton_u32(clientId_);
+                vhdr.packet_seq = hton_u32(packetSeq_ - 1);
+                vhdr.total_packet_len = hton_u32((uint32_t)total_len);
+                vhdr.frag_offset = hton_u32((uint32_t)offset);
+                vhdr.frag_payload_len = hton_u16((uint16_t)this_payload);
+                vhdr.total_frags = hton_u16(total_frags);
+                vhdr.frag_index = hton_u16(frag_idx);
+                vhdr.flags = hton_u16(0);
+                vhdr.pts = hton_u64(pts);
+
+                std::vector<char> out;
+                out.reserve(sizeof(vhdr) + this_payload);
+                out.insert(out.end(), (char*)&vhdr, ((char*)&vhdr) + sizeof(vhdr));
+                out.insert(out.end(), packet.data() + offset, packet.data() + offset + this_payload);
+
+                // Pacing: ensure we don't exceed requested bitrate
+                pace_before_send(out.size());
+
+                // Send via UDP (handle EAGAIN)
+                ssize_t sent_total = 0;
+                const char *sendbuf = out.data();
+                size_t tosend = out.size();
+                int retry = 0;
+                while (sent_total < (ssize_t)tosend) {
+                    ssize_t rc = sendto(udpSock, sendbuf + sent_total, (int)(tosend - sent_total), 0,
+                                        (sockaddr*)&serverAddr, sizeof(serverAddr));
+                    if (rc < 0) {
+#ifdef __linux__
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            // wait a bit and retry
+                            pollfd pfd{udpSock, POLLOUT, 0};
+                            poll(&pfd, 1, 50);
+                            retry++;
+                            if (retry > 20) {
+                                LOG_NET_INFO("sendto repeatedly EAGAIN, aborting fragment");
+                                break;
+                            }
+                            continue;
+                        }
+#else
+                            int err = WSAGetLastError();
+                        if (err == WSAEWOULDBLOCK) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                            retry++;
+                            if (retry > 50) break;
+                            continue;
+                        }
+#endif
+                        LOG_NET_INFO("sendto failed: {}", strerror(errno));
+                        break;
+                    }
+                    sent_total += rc;
+                }
+                if (sent_total != (ssize_t)tosend) {
+                    LOG_NET_INFO("Fragment send incomplete ({}/{})", sent_total, tosend);
+                    // We choose to continue (best effort) or could break and abort whole packet.
+                }
+
+                LOG_FEC_DEBUG("video_send_frag: client_id={} seq={} frag={}/{} off={} len={} pts={}",
+                              clientId_, packetSeq_-1, frag_idx, total_frags, offset, this_payload, pts);
+
+                offset += this_payload;
+            } // frag loop
+
+            // Small gap between NALs to avoid saturating link
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        }
+        } // for nals
 
         if (!loop_) break;
-        // small sleep to avoid tight infinite loop saturating bandwidth in tests
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     } while (loop_);
 
@@ -549,25 +568,31 @@ bool Client::run() {
     if (!initAndConnect(tcpSock, udpSock)) return false;
 
     uint32_t seq = 1;
-    if (sendUdpRegister(udpSock, seq++)) {
+    if (sendTcpRegister(tcpSock, seq++)) {
         uint32_t assigned = 0;
-        if (receiveUdpRegisterResp(udpSock, assigned, 2000)) {
+        if (receiveTcpRegisterResp(tcpSock, assigned, 2000)) {
             clientId_ = assigned;
             LOG_GEN_INFO("Assigned client id={}", clientId_);
         } else {
-            LOG_GEN_WARN("No UDP register response - continuing with id=0");
+            LOG_GEN_ERROR("No TCP register response received");
+            closeSocketLocal(tcpSock);
+            closeSocketLocal(udpSock);
+            return false;
         }
     } else {
-        LOG_GEN_WARN("UDP register send failed");
+        LOG_GEN_ERROR("TCP register send failed");
+        closeSocketLocal(tcpSock);
+        closeSocketLocal(udpSock);
+        return false;
     }
 
-    // start UDP listener thread to receive runtime commands (e.g. set bitrate)
-    startUdpListener(udpSock);
+    // start TCP listener thread to receive runtime commands (e.g. set bitrate)
+    startTcpListener(tcpSock);
 
-    bool ok = tcpStreamRun(tcpSock);
+    bool ok = udpStreamRun(udpSock);
 
-    // shutdown udp listener first
-    stopUdpListener();
+    // shutdown TCP listener first
+    stopTcpListener();
 
     closeSocketLocal(tcpSock);
     closeSocketLocal(udpSock);

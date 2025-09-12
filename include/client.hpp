@@ -33,19 +33,19 @@ namespace project {
 
         private:
             bool initAndConnect(project::common::sock_t &outTcp, project::common::sock_t &outUdp);
-            bool sendUdpRegister(project::common::sock_t udpSock, uint32_t seq);
-            bool receiveUdpRegisterResp(project::common::sock_t udpSock, uint32_t &assigned, int timeoutMs = 2000);
-            bool tcpStreamRun(project::common::sock_t sock);
+            bool sendTcpRegister(project::common::sock_t tcpSock, uint32_t seq);
+            bool receiveTcpRegisterResp(project::common::sock_t tcpSock, uint32_t &assigned, int timeoutMs = 2000);
+            bool udpStreamRun(project::common::sock_t sock);
 
             void closeSocketLocal(project::common::sock_t s);
 
             // Helpers
             static std::vector<std::vector<char>> extractAnnexBNals(const std::vector<char> &data);
 
-            // UDP command listener (changes bitrate at runtime)
-            void startUdpListener(project::common::sock_t udpSock);
-            void stopUdpListener();
-            void udpListenerLoop(project::common::sock_t udpSock);
+            // TCP command listener (changes bitrate at runtime)
+            void startTcpListener(project::common::sock_t tcpSock);
+            void stopTcpListener();
+            void tcpListenerLoop(project::common::sock_t tcpSock);
 
             // pacing
             void pace_before_send(size_t bytes);
@@ -65,9 +65,9 @@ namespace project {
             double tokens_; // bytes currently available
             std::chrono::steady_clock::time_point last_fill_;
 
-            // UDP listener thread
-            std::thread udp_listener_thread_;
-            std::atomic<bool> stop_udp_listener_;
+            // TCP listener thread
+            std::thread tcp_listener_thread_;
+            std::atomic<bool> stop_tcp_listener_;
         };
 
     } // namespace client

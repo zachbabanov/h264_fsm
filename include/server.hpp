@@ -41,10 +41,11 @@ namespace project {
         };
 
         struct Connection {
-            sock_t fd;
+            sock_t tcp_fd;      // TCP socket for commands
+            sock_t udp_fd;      // UDP socket for video (not used directly, stored for client address)
             uint32_t clientId;
             State state;
-            std::string inBuffer;     // raw bytes received from socket
+            std::string inBuffer;     // raw bytes received from TCP socket
             std::string playerBuffer; // bytes pending to write to player
 
             // Buffering with timestamps
@@ -64,15 +65,43 @@ namespace project {
             std::chrono::steady_clock::time_point playback_start; // wallclock when first frame is scheduled
             bool playback_started;
 
-            Connection() : fd(INVALID_SOCK), clientId(0), state(State::READING),
+            // UDP client address for video
+            sockaddr_in udp_addr;
+            bool udp_addr_set;
+
+            Connection() : tcp_fd(INVALID_SOCK), udp_fd(INVALID_SOCK), clientId(0), state(State::READING),
                            last_pts(0), first_pts(0), first_frame_received(false),
                            sps_received(false), pps_received(false),
-                           player(nullptr), playback_start(std::chrono::steady_clock::time_point{}), playback_started(false) {}
-            explicit Connection(sock_t s) : fd(s), clientId(0), state(State::READING),
+                           player(nullptr), playback_start(std::chrono::steady_clock::time_point{}), playback_started(false),
+                           udp_addr_set(false) {}
+            explicit Connection(sock_t s) : tcp_fd(s), udp_fd(INVALID_SOCK), clientId(0), state(State::READING),
                                             last_pts(0), first_pts(0), first_frame_received(false),
                                             sps_received(false), pps_received(false),
-                                            player(nullptr), playback_start(std::chrono::steady_clock::time_point{}), playback_started(false) {}
+                                            player(nullptr), playback_start(std::chrono::steady_clock::time_point{}), playback_started(false),
+                                            udp_addr_set(false) {}
         };
+
+        //
+        // InProgress: structure used to reassemble UDP fragments into one encoded packet
+        //
+        struct InProgress {
+            uint32_t client_id;
+            uint32_t packet_seq;
+            uint32_t total_packet_len;
+            uint16_t total_frags;
+            uint64_t pts;
+            std::vector<char> buffer;
+            std::vector<char> fragment_received; // per-fragment marker (0/1)
+            size_t received_bytes;
+            std::chrono::steady_clock::time_point first_seen;
+
+            InProgress() : client_id(0), packet_seq(0), total_packet_len(0), total_frags(0),
+                           pts(0), received_bytes(0), first_seen(std::chrono::steady_clock::now()) {}
+        };
+
+        inline uint64_t make_inprogress_key(uint32_t client_id, uint32_t packet_seq) {
+            return ( (uint64_t)client_id << 32 ) | (uint64_t)packet_seq;
+        }
 
         class Server {
         public:
@@ -85,9 +114,9 @@ namespace project {
         private:
             bool setupListenSocket();
             void acceptNewConnections();
-            void handleClientEvent(sock_t fd, uint32_t events = 0);
+            void handleTcpEvent(sock_t fd, uint32_t events = 0);
+            void handleUdpVideoEvent(sock_t udpFd);
             void handlePlayerFdEvent(int playerFd);
-            void handleUdpPacket(sock_t udpFd);
             void closeConnection(sock_t fd);
             void flushPlayerBuffer(Connection &c);
             void processFrameQueue(Connection &c);
@@ -98,15 +127,16 @@ namespace project {
         private:
             int tcpPort_;
             int udpPort_;
-            sock_t listenSocket_;
-            sock_t udpSocket_; // stored UDP socket for both platforms
+            sock_t tcpListenSocket_;
+            sock_t udpVideoSocket_; // UDP socket for video
 #ifdef __linux__
             int epollFd_;
             std::unordered_map<int, sock_t> playerFdToClientFd_;
 #endif
-            std::unordered_map<sock_t, Connection> clients_;
-            // Map client_id -> last seen UDP addr (filled on register)
-            std::unordered_map<uint32_t, sockaddr_in> udpClientAddrs_;
+            std::unordered_map<sock_t, Connection> clients_; // key is TCP socket fd
+
+            // Map for reassembly of UDP fragments: key = (client_id<<32)|packet_seq
+            std::unordered_map<uint64_t, InProgress> inprogress_map_;
 
             uint32_t nextClientId_;
             std::string playerCmd_;
