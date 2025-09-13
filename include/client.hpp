@@ -23,7 +23,8 @@ namespace project {
 
         class Client {
         public:
-            Client(const std::string &host, int port, const std::string &h264File, bool loop);
+            // added use_fec flag (true = enable FEC encoding path; false = pass-through)
+            Client(const std::string &host, int port, const std::string &h264File, bool loop, bool use_fec = true);
             ~Client();
 
             bool run();
@@ -58,6 +59,9 @@ namespace project {
             bool loop_;
             uint32_t clientId_;
             uint32_t packetSeq_;
+
+            // new: whether to use FEC encoding
+            bool use_fec_;
 
             // rate control
             std::atomic<uint32_t> bitrate_kbps_; // 0 = unlimited

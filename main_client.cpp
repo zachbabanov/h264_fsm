@@ -16,8 +16,9 @@ using namespace project::client;
 using namespace project::log;
 
 static void print_usage(const char *prog) {
-    std::cerr << "Usage: " << prog << " [--bitrate <kbps>] <host:port> <h264_file> <loop (0|1)>\n";
+    std::cerr << "Usage: " << prog << " [--bitrate <kbps>] [--no-fec] <host:port> <h264_file> <loop (0|1)>\n";
     std::cerr << "Example: " << prog << " --bitrate 1000 127.0.0.1:8000 test.h264 1\n";
+    std::cerr << "Example (no FEC): " << prog << " --no-fec 127.0.0.1:8000 test.h264 0\n";
 }
 
 int main(int argc, char **argv) {
@@ -32,8 +33,9 @@ int main(int argc, char **argv) {
     std::string h264file;
     bool loop = false;
     uint32_t initial_bitrate_kbps = 0;
+    bool use_fec = true;
 
-    // Simple arg parsing that allows --bitrate anywhere
+    // Simple arg parsing that allows --bitrate and --no-fec anywhere
     std::vector<std::string> pos;
     for (int i = 1; i < argc; ++i) {
         std::string a(argv[i]);
@@ -44,6 +46,8 @@ int main(int argc, char **argv) {
             }
             initial_bitrate_kbps = (uint32_t)std::stoul(argv[i+1]);
             i++;
+        } else if (a == "--no-fec") {
+            use_fec = false;
         } else {
             pos.push_back(a);
         }
@@ -72,9 +76,11 @@ int main(int argc, char **argv) {
         port = std::stoi(port_s);
     }
 
-    LOG_GEN_INFO("Starting client -> {}:{} file='{}' loop={} initial_bitrate_kbps={}", host, port, h264file, loop ? 1 : 0, initial_bitrate_kbps);
+    LOG_GEN_INFO("Starting client -> {}:{} file='{}' loop={} initial_bitrate_kbps={} use_fec={}",
+                 host, port, h264file, loop ? 1 : 0, initial_bitrate_kbps, use_fec ? "yes" : "no");
 
-    Client c(host, port, h264file, loop);
+    // New constructor overload includes use_fec flag
+    Client c(host, port, h264file, loop, use_fec);
     if (initial_bitrate_kbps > 0) {
         c.set_initial_bitrate(initial_bitrate_kbps);
     }

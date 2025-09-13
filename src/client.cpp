@@ -4,9 +4,9 @@
 *
 */
 
-#include <encoder.hpp>
 #include <client.hpp>
 #include <common.hpp>
+#include <encoder.hpp>
 #include <logger.hpp>
 
 #include <iostream>
@@ -33,9 +33,10 @@ using namespace project::common;
 using namespace project::fec;
 using namespace project::log;
 
-Client::Client(const std::string &host, int port, const std::string &h264File, bool loop)
+Client::Client(const std::string &host, int port, const std::string &h264File, bool loop, bool use_fec)
         : host_(host), tcpPort_(port), udpPort_(port + 1), h264File_(h264File), loop_(loop),
           clientId_(0), packetSeq_(1),
+          use_fec_(use_fec),
           bitrate_kbps_(0), tokens_(0.0), last_fill_(std::chrono::steady_clock::now()),
           stop_tcp_listener_(false)
 {}
@@ -426,6 +427,8 @@ bool Client::udpStreamRun(sock_t udpSock) {
     const size_t frag_hdr_size = sizeof(common::UdpVideoFragmentHeader);
     const size_t max_fragment_payload = (MAX_UDP_PACKET_SIZE > frag_hdr_size) ? (MAX_UDP_PACKET_SIZE - frag_hdr_size) : 256;
 
+    LOG_GEN_INFO("UDP streaming to {}:{} use_fec={}", host_, udpPort_, use_fec_ ? "yes" : "no");
+
     // Send NAL units in order; if loop_ is true, repeat indefinitely.
     do {
         for (size_t i = 0; i < nals.size(); ++i) {
@@ -455,11 +458,26 @@ bool Client::udpStreamRun(sock_t udpSock) {
             uint64_t pts = frame_count * 40;
             if (is_vcl) frame_count++;
 
-            // For now pick modest fec params; encoder can decide actual encoded length
-            uint16_t fec_k = 10;
-            uint16_t fec_m = 2;
+            // Choose FEC parameters depending on mode
+            uint16_t fec_k = 1;
+            uint16_t fec_m = 0;
             uint16_t flags = 0;
 
+            if (use_fec_) {
+                // Estimate number of 255-byte symbols required for this nal
+                // (this mirrors the earlier heuristic). Keep m small (e.g. 2).
+                constexpr size_t SYMBOL_SIZE = 255;
+                fec_k = (uint16_t)((nal.size() + SYMBOL_SIZE - 1) / SYMBOL_SIZE);
+                if (fec_k == 0) fec_k = 1;
+                // keep a modest parity count but don't exceed available room
+                fec_m = 2;
+            } else {
+                // pass-through: single data symbol, no parity
+                fec_k = 1;
+                fec_m = 0;
+            }
+
+            // Build encoded packet (header + encoded payload)
             auto packet = encoder.encode_with_header(clientId_, packetSeq_++, fec_k, fec_m, flags,
                                                      pts,
                                                      nal.data(), nal.size());
@@ -541,11 +559,11 @@ bool Client::udpStreamRun(sock_t udpSock) {
                 }
                 if (sent_total != (ssize_t)tosend) {
                     LOG_NET_INFO("Fragment send incomplete ({}/{})", sent_total, tosend);
-                    // We choose to continue (best effort) or could break and abort whole packet.
+                    // best-effort: continue
                 }
 
-                LOG_FEC_DEBUG("video_send_frag: client_id={} seq={} frag={}/{} off={} len={} pts={}",
-                              clientId_, packetSeq_-1, frag_idx, total_frags, offset, this_payload, pts);
+                LOG_FEC_DEBUG("video_send_frag: client_id={} seq={} frag={}/{} off={} len={} pts={} use_fec={}",
+                              clientId_, packetSeq_-1, frag_idx, total_frags, offset, this_payload, pts, use_fec_ ? 1 : 0);
 
                 offset += this_payload;
             } // frag loop
