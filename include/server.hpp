@@ -18,6 +18,7 @@
 #include <memory>
 #include <chrono>
 #include <queue>
+#include <cstdint>
 
 #include <netinet/in.h>
 
@@ -83,6 +84,7 @@ namespace project {
 
         //
         // InProgress: structure used to reassemble UDP fragments into one encoded packet
+        // Extended to keep FEC meta duplicated in UDP fragment header and per-fragment offsets
         //
         struct InProgress {
             uint32_t client_id;
@@ -90,13 +92,24 @@ namespace project {
             uint32_t total_packet_len;
             uint16_t total_frags;
             uint64_t pts;
-            std::vector<char> buffer;
-            std::vector<char> fragment_received; // per-fragment marker (0/1)
+
+            // Duplicated FEC meta (taken from UdpVideoFragmentHeader)
+            uint16_t fec_k;
+            uint16_t fec_m;
+            uint32_t encoded_payload_len; // length of encoded payload bytes (packet_len - FEC_PACKET_HEADER_SIZE)
+
+            // Reassembly buffer and bookkeeping
+            std::vector<char> buffer;                // size == total_packet_len
+            std::vector<char> fragment_received;     // per-fragment marker (0/1)
+            std::vector<uint32_t> frag_offsets;      // per-fragment offset into total packet
+            std::vector<uint16_t> frag_lens;         // per-fragment payload length
             size_t received_bytes;
             std::chrono::steady_clock::time_point first_seen;
 
-            InProgress() : client_id(0), packet_seq(0), total_packet_len(0), total_frags(0),
-                           pts(0), received_bytes(0), first_seen(std::chrono::steady_clock::now()) {}
+            InProgress()
+                    : client_id(0), packet_seq(0), total_packet_len(0), total_frags(0),
+                      pts(0), fec_k(0), fec_m(0), encoded_payload_len(0),
+                      received_bytes(0), first_seen(std::chrono::steady_clock::now()) {}
         };
 
         inline uint64_t make_inprogress_key(uint32_t client_id, uint32_t packet_seq) {

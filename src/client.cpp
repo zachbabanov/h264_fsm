@@ -22,6 +22,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <poll.h>
+#include <unistd.h>
 #else
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -513,6 +514,16 @@ bool Client::udpStreamRun(sock_t udpSock) {
                 vhdr.flags = hton_u16(0);
                 vhdr.pts = hton_u64(pts);
 
+                // Duplicate minimal FEC meta so server can decode even if main header lost
+                // encoded_payload_len = total_len - FEC_PACKET_HEADER_SIZE (encoded payload bytes only)
+                uint32_t encoded_payload_len = 0;
+                if (total_len > (int)project::fec::FEC_PACKET_HEADER_SIZE) {
+                    encoded_payload_len = (uint32_t)(total_len - project::fec::FEC_PACKET_HEADER_SIZE);
+                }
+                vhdr.fec_k = hton_u16(fec_k);
+                vhdr.fec_m = hton_u16(fec_m);
+                vhdr.encoded_payload_len = hton_u32(encoded_payload_len);
+
                 std::vector<char> out;
                 out.reserve(sizeof(vhdr) + this_payload);
                 out.insert(out.end(), (char*)&vhdr, ((char*)&vhdr) + sizeof(vhdr));
@@ -543,7 +554,7 @@ bool Client::udpStreamRun(sock_t udpSock) {
                             continue;
                         }
 #else
-                        int err = WSAGetLastError();
+                            int err = WSAGetLastError();
         if (err == WSAEWOULDBLOCK) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             retry++;
@@ -568,7 +579,7 @@ bool Client::udpStreamRun(sock_t udpSock) {
             } // frag loop
 
             // Small gap between NALs to avoid saturating link
-            std::this_thread::sleep_for(std::chrono::milliseconds(3));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         } // for nals
 
         if (!loop_) break;

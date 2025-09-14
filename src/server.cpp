@@ -547,6 +547,7 @@ void Server::handleTcpEvent(sock_t fd, uint32_t events) {
     }
 }
 
+// --- Updated UDP video event handler with partial-decode logic ---
 void Server::handleUdpVideoEvent(sock_t udpFd) {
     char buf[ (int)MAX_UDP_PACKET_SIZE ];
     sockaddr_in src{};
@@ -559,7 +560,7 @@ void Server::handleUdpVideoEvent(sock_t udpFd) {
         return;
     }
 
-    // Parse fragment header
+    // Parse fragment header (note: header now contains duplicated FEC meta)
     common::UdpVideoFragmentHeader vhdr;
     memcpy(&vhdr, buf, sizeof(vhdr));
 
@@ -572,6 +573,11 @@ void Server::handleUdpVideoEvent(sock_t udpFd) {
     uint16_t frag_index = ntoh_u16(vhdr.frag_index);
     uint16_t flags = ntoh_u16(vhdr.flags);
     uint64_t pts = ntoh_u64(vhdr.pts);
+
+    // New duplicated FEC meta (from fragment header)
+    uint16_t fec_k = ntoh_u16(vhdr.fec_k);
+    uint16_t fec_m = ntoh_u16(vhdr.fec_m);
+    uint32_t encoded_payload_len = ntoh_u32(vhdr.encoded_payload_len);
 
     // Basic sanity checks
     if (total_packet_len == 0 || total_packet_len > MAX_UDP_REASSEMBLY_BYTES) {
@@ -618,6 +624,12 @@ void Server::handleUdpVideoEvent(sock_t udpFd) {
         ip.total_packet_len = total_packet_len;
         ip.total_frags = total_frags;
         ip.pts = pts;
+
+        // store duplicated FEC meta
+        ip.fec_k = fec_k;
+        ip.fec_m = fec_m;
+        ip.encoded_payload_len = encoded_payload_len;
+
         ip.buffer.assign(total_packet_len, 0);
         ip.fragment_received.assign(total_frags, 0);
         ip.received_bytes = 0;
@@ -645,13 +657,11 @@ void Server::handleUdpVideoEvent(sock_t udpFd) {
         LOG_FEC_DEBUG("Duplicate fragment client={} seq={} frag={} ignored", client_id, packet_seq, frag_index);
     }
 
-    LOG_FEC_DEBUG("Received fragment client={} seq={} frag={}/{} off={} len={} got_bytes={}/{}",
-                  client_id, packet_seq, frag_index, total_frags, frag_offset, frag_payload_len, ip.received_bytes, ip.total_packet_len);
+    LOG_FEC_DEBUG("Received fragment client={} seq={} frag={}/{} off={} len={} got_bytes={}/{} (fec_k={} fec_m={})",
+                  client_id, packet_seq, frag_index, total_frags, frag_offset, frag_payload_len, ip.received_bytes, ip.total_packet_len, ip.fec_k, ip.fec_m);
 
-    // If we've received all bytes (simple test), assemble and decode
+    // If we've received all bytes (simple test), assemble and decode (original path)
     if (ip.received_bytes >= ip.total_packet_len) {
-        auto assembled_time = std::chrono::steady_clock::now();
-
         // Move assembled buffer into local vector and erase inprogress
         std::vector<char> assembled = std::move(ip.buffer);
         inprogress_map_.erase(it);
@@ -699,7 +709,6 @@ void Server::handleUdpVideoEvent(sock_t udpFd) {
         // Compute enqueue-time latency metric (wallclock vs PTS schedule)
         {
             auto now = std::chrono::steady_clock::now();
-            // If playback started, compute relative offsets
             if (conn->playback_started) {
                 auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - conn->playback_start).count();
                 int64_t target_offset = (int64_t)frame.pts - (int64_t)conn->first_pts;
@@ -708,13 +717,104 @@ void Server::handleUdpVideoEvent(sock_t udpFd) {
                 LOG_VIDEO_INFO("frame_enqueue_latency: client_id={} seq={} pts={} enqueue_latency_ms={} queue_size={} frame_size={}",
                                conn->clientId, packet_seq, frame.pts, enqueue_latency, (uint32_t)conn->frame_queue.size(), (uint32_t)frame.data.size());
             } else {
-                // Shouldn't happen because we set playback_started above, but keep guard
                 LOG_VIDEO_INFO("frame_enqueue (no playback started yet): client_id={} seq={} pts={} queue_size={} frame_size={}",
                                conn->clientId, packet_seq, frame.pts, (uint32_t)conn->frame_queue.size(), (uint32_t)frame.data.size());
             }
         }
 
         LOG_PLAYER_INFO("Queued frame for client_id={} pts={} is_keyframe={} size={}",
+                        conn->clientId, frame.pts, frame.is_keyframe, frame.data.size());
+
+        return;
+    }
+
+    // --- Opportunistic partial decode path ---
+    // Compute FEC-symbol coverage heuristically and attempt decode if enough symbols present.
+    // We assume encoder uses SYMBOL_SIZE = 255 (same as client).
+    const size_t SYMBOL_SIZE = 255;
+    uint16_t fec_fragments = 0;
+    if (ip.encoded_payload_len > 0) {
+        fec_fragments = (uint16_t)((ip.encoded_payload_len + SYMBOL_SIZE - 1) / SYMBOL_SIZE);
+    }
+
+    // Build bitmap whether each FEC symbol/block is fully present (heuristic: all bytes non-zero)
+    std::vector<uint8_t> symbol_full;
+    if (fec_fragments > 0) {
+        symbol_full.assign(fec_fragments, 0);
+        size_t payload_base = project::fec::FEC_PACKET_HEADER_SIZE;
+        for (uint16_t fi = 0; fi < fec_fragments; ++fi) {
+            size_t start = payload_base + (size_t)fi * SYMBOL_SIZE;
+            size_t remain = (size_t)ip.encoded_payload_len - (size_t)fi * SYMBOL_SIZE;
+            size_t check_len = std::min((size_t)SYMBOL_SIZE, remain);
+            if (start + check_len > ip.buffer.size()) {
+                symbol_full[fi] = 0;
+                continue;
+            }
+            bool full = true;
+            for (size_t b = 0; b < check_len; ++b) {
+                if (ip.buffer[start + b] == 0) { full = false; break; }
+            }
+            symbol_full[fi] = full ? 1 : 0;
+        }
+    }
+
+    int fully_present = 0;
+    for (auto v : symbol_full) if (v) fully_present++;
+
+    bool can_attempt_decode = false;
+    if (ip.encoded_payload_len == 0) {
+        can_attempt_decode = true;
+    } else if (ip.fec_k > 0 && fec_fragments > 0) {
+        if (fully_present >= (int)ip.fec_k) can_attempt_decode = true;
+    }
+
+    if (can_attempt_decode) {
+        StubFec decoder;
+
+        const char *payload_ptr = ip.buffer.data() + project::fec::FEC_PACKET_HEADER_SIZE;
+        size_t payload_len = (size_t)ip.encoded_payload_len;
+
+        // call decode_payload(payload_ptr, payload_len, fec_fragments, orig_len)
+        std::vector<char> decoded = decoder.decode_payload(payload_ptr, payload_len, fec_fragments, ip.encoded_payload_len);
+        if (decoded.empty()) {
+            // decode failed — continue waiting for more fragments
+            LOG_FEC_WARN("partial decode attempt failed client_id={} seq={} (will wait for more fragments)", client_id, packet_seq);
+            return;
+        }
+
+        // remove inprogress entry now that decoded
+        inprogress_map_.erase(key);
+
+        // use decoded as payload
+        bool payload_has_sps = false, payload_has_pps = false, payload_has_idr = false;
+        analyze_nal_types(decoded, payload_has_sps, payload_has_pps, payload_has_idr);
+
+        if (payload_has_sps) {
+            conn->sps_received = true;
+            conn->sps_data = decoded;
+            LOG_PLAYER_INFO("Detected SPS for client_id={}", conn->clientId);
+        }
+        if (payload_has_pps) {
+            conn->pps_received = true;
+            conn->pps_data = decoded;
+            LOG_PLAYER_INFO("Detected PPS for client_id={}", conn->clientId);
+        }
+
+        VideoFrame frame;
+        frame.data = std::move(decoded);
+        frame.is_keyframe = payload_has_idr;
+        frame.pts = ip.pts;
+
+        conn->frame_queue.push(frame);
+
+        if (!conn->first_frame_received) {
+            conn->first_frame_received = true;
+            conn->first_pts = frame.pts;
+            conn->playback_start = std::chrono::steady_clock::now();
+            conn->playback_started = true;
+        }
+
+        LOG_PLAYER_INFO("Queued frame (partial-decode) for client_id={} pts={} is_keyframe={} size={}",
                         conn->clientId, frame.pts, frame.is_keyframe, frame.data.size());
     }
 }

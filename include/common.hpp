@@ -56,7 +56,8 @@ namespace project {
 #pragma pack(pop)
 
         // UDP video fragment header (packed). Sent BEFORE fragment payload bytes.
-        // Fixed size = 32 bytes.
+        // NOTE: расширен для дублирования FEC-метаданных — это даёт серверу возможность
+        // узнать параметры кодирования даже если wire-заголовок потерялся.
 #pragma pack(push,1)
         struct UdpVideoFragmentHeader {
             uint32_t client_id;          // 0..3
@@ -64,10 +65,18 @@ namespace project {
             uint32_t total_packet_len;   // 8..11 total length of the whole encoded packet (header+payload)
             uint32_t frag_offset;        // 12..15 offset into total packet where this fragment belongs
             uint16_t frag_payload_len;   // 16..17 length of payload bytes in this fragment
-            uint16_t total_frags;        // 18..19 total number of fragments (informational)
+            uint16_t total_frags;        // 18..19 total number of UDP fragments (informational)
             uint16_t frag_index;         // 20..21 fragment index (0-based)
             uint16_t flags;              // 22..23 reserved flags (e.g., PROBE)
             uint64_t pts;                // 24..31 PTS in milliseconds (client-supplied)
+
+            // --- duplicated FEC meta (host-independent; on-wire in network order) ---
+            // These fields were added so any UDP fragment carries minimal info
+            // about FEC parameters for the encoded packet it belongs to.
+            uint16_t fec_k;              // 32..33 number of data FEC symbols
+            uint16_t fec_m;              // 34..35 number of parity FEC symbols
+            uint32_t encoded_payload_len; // 36..39 length in bytes of encoded payload (not counting FEC header)
+            // total header size: 40 bytes
         };
 #pragma pack(pop)
 
