@@ -1,0 +1,123 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/schemas/client-config.json",
+  "title": "H264 Stream Client Configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "host": {
+      "type": "string",
+      "description": "IP-адрес или имя хоста сервера (без порта). Можно задавать вместо hostport."
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535,
+      "default": 8000,
+      "description": "TCP порт сервера. Используется вместе с `host` для формирования `host:port`."
+    },
+    "hostport": {
+      "type": "string",
+      "pattern": "^[^:\\s]+:[0-9]{1,5}$",
+      "description": "Альтернативный способ указать адрес сервера в виде \"host:port\". Если задан, имеет приоритет над host+port."
+    },
+    "h264_file": {
+      "type": "string",
+      "description": "Путь к локальному raw H.264 (Annex-B) файлу, который будет отправляться (используется, когда stream_mode=false)."
+    },
+    "loop": {
+      "type": "boolean",
+      "default": false,
+      "description": "Если true — повторять отправку файла бесконечно (только для режима файла)."
+    },
+    "bitrate_kbps": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Начальный битрейт в килобит/с. 0 = неограничено."
+    },
+    "use_fec": {
+      "type": "boolean",
+      "default": true,
+      "description": "Включить FEC (Reed-Solomon) на клиенте. false — pass-through (без FEC)."
+    },
+    "log_file": {
+      "type": "string",
+      "description": "Путь к файлу логов (опционально). Если не указан — логи идут в stderr."
+    },
+    "log_level": {
+      "type": "string",
+      "enum": ["debug", "info", "warn", "error"],
+      "default": "info",
+      "description": "Уровень логирования."
+    },
+    "stream_mode": {
+      "type": "boolean",
+      "default": false,
+      "description": "Если true — читать H.264 не из файла, а из внешнего потока (через ffmpeg)."
+    },
+    "stream_source": {
+      "type": "string",
+      "description": "URL источника потока (rtsp://..., http://..., udp://..., и т.п.). Требуется, если stream_mode=true."
+    },
+    "stream": {
+      "type": "object",
+      "description": "Альтернативная форма указания параметров потока (backwards-compatible).",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean", "description": "Эквивалент stream_mode."},
+        "source": { "type": "string", "description": "Эквивалент stream_source."}
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "required": ["hostport"]
+    },
+    {
+      "required": ["host"]
+    }
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": { "stream_mode": { "const": true } }
+      },
+      "then": {
+        "required": ["stream_source"]
+      },
+      "else": {
+        "required": ["h264_file"]
+      }
+    }
+  ],
+  "examples": [
+    {
+      "host": "127.0.0.1",
+      "port": 8000,
+      "h264_file": "test.h264",
+      "loop": false,
+      "bitrate_kbps": 8000,
+      "use_fec": true,
+      "log_level": "info"
+    },
+    {
+      "hostport": "192.168.1.10:9000",
+      "stream_mode": true,
+      "stream_source": "rtsp://192.168.1.20:554/live",
+      "bitrate_kbps": 4000,
+      "use_fec": false,
+      "log_file": "client.log",
+      "log_level": "debug"
+    },
+    {
+      "host": "example.com",
+      "port": 8000,
+      "stream": {
+        "enabled": true,
+        "source": "http://camera.local:8080/stream"
+      },
+      "use_fec": true
+    }
+  ]
+}
