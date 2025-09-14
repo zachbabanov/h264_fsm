@@ -18,9 +18,9 @@ using namespace project::client;
 using namespace project::log;
 
 static void print_usage(const char *prog) {
-    std::cerr << "Usage: " << prog << " [--bitrate <kbps>] [--no-fec] [--log <log_file>] [--log-level debug|info|warn|error] <host:port> <h264_file> <loop (0|1)>\n";
-    std::cerr << "Example: " << prog << " --bitrate 1000 --log client.log --log-level info 127.0.0.1:8000 test.h264 1\n";
-    std::cerr << "Example (no FEC): " << prog << " --no-fec --log client.log 127.0.0.1:8000 test.h264 0\n";
+    std::cerr << "Usage: " << prog << " [--bitrate <kbps>] [--no-fec] [--stream <url>] [--log <log_file>] [--log-level debug|info|warn|error] <host:port> <h264_file_or_url> <loop (0|1)>\n";
+    std::cerr << "Example file: " << prog << " --bitrate 1000 --log client.log --log-level info 127.0.0.1:8000 test.h264 1\n";
+    std::cerr << "Example stream: " << prog << " --stream rtsp://127.0.0.1/stream --bitrate 8000 127.0.0.1:8000 rtsp://127.0.0.1/stream 0\n";
 }
 
 static Level parse_log_level_or_default(const std::string &s, Level def = Level::INFO) {
@@ -45,14 +45,15 @@ int main(int argc, char **argv) {
     }
 
     std::string hostport;
-    std::string h264file;
+    std::string h264source;
     bool loop = false;
     uint32_t initial_bitrate_kbps = 0;
     bool use_fec = true;
     std::string log_file;
     std::string log_level_str;
+    bool stream_mode = false;
 
-    // Simple arg parsing that allows --bitrate, --no-fec, --log, --log-level anywhere
+    // Simple arg parsing that allows --bitrate, --no-fec, --log, --log-level, --stream anywhere
     std::vector<std::string> pos;
     for (int i = 1; i < argc; ++i) {
         std::string a(argv[i]);
@@ -79,6 +80,10 @@ int main(int argc, char **argv) {
             }
             log_level_str = argv[i+1];
             i++;
+        } else if (a == "--stream") {
+            // Indicate stream mode; the URL will be also given as the h264_source positional arg
+            stream_mode = true;
+            // Note: we do not consume URL here; it's expected to be present among positionals
         } else {
             pos.push_back(a);
         }
@@ -90,7 +95,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     hostport = pos[0];
-    h264file = pos[1];
+    h264source = pos[1];
     loop = (pos[2] != "0");
 
     // parse host:port
@@ -130,11 +135,11 @@ int main(int argc, char **argv) {
         }
     }
 
-    LOG_GEN_INFO("Starting client -> {}:{} file='{}' loop={} initial_bitrate_kbps={} use_fec={}",
-                 host, port, h264file, loop ? 1 : 0, initial_bitrate_kbps, use_fec ? "yes" : "no");
+    LOG_GEN_INFO("Starting client -> {}:{} source='{}' loop={} initial_bitrate_kbps={} use_fec={} stream_mode={}",
+                 host, port, h264source, loop ? 1 : 0, initial_bitrate_kbps, use_fec ? "yes" : "no", stream_mode ? "yes" : "no");
 
-    // Client constructor overload that accepts use_fec flag
-    Client c(host, port, h264file, loop, use_fec);
+    // Client constructor overload that accepts use_fec flag and stream flag
+    Client c(host, port, h264source, loop, use_fec, stream_mode);
     if (initial_bitrate_kbps > 0) {
         c.set_initial_bitrate(initial_bitrate_kbps);
     }
