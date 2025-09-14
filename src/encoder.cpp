@@ -1,14 +1,20 @@
-/* encoder.cpp — замените старый файл этим кодом */
+/*
+* @license
+* (C) zachbabanov
+*
+*/
+
 #include <encoder.hpp>
 #include <logger.hpp>
 #include <common.hpp>
-#include <vector>
+
+#include <algorithm>
 #include <cstring>
 #include <cassert>
 #include <sstream>
 #include <iomanip>
-#include <algorithm>
 #include <chrono>
+#include <vector>
 
 // We need gf operations from rs implementation
 #include <gf.hpp>

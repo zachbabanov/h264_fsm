@@ -1,8 +1,8 @@
 /*
- * @license
- * (C) zachbabanov
- *
- */
+* @license
+* (C) zachbabanov
+*
+*/
 
 #ifndef PROJECT_ENCODER_HPP
 #define PROJECT_ENCODER_HPP

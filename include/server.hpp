@@ -13,12 +13,12 @@
 #include <player.hpp>
 
 #include <unordered_map>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <memory>
 #include <chrono>
 #include <queue>
-#include <cstdint>
 
 #include <netinet/in.h>
 
