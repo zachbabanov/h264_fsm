@@ -569,7 +569,7 @@ bool Client::udpStreamRun(sock_t udpSock) {
             } // frag loop
 
             // Small gap between NALs to avoid saturating link
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            std::this_thread::sleep_for(std::chrono::milliseconds(3));
         } // for nals
 
         if (!loop_) break;
