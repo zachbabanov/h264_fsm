@@ -13,6 +13,21 @@
 
 using namespace project::fec;
 
+/**
+ * Sanity check: StubFec decode_payload returns exact input (pass-through).
+ */
+TEST_CASE("StubFec pass-through decode", "[fec][decode]") {
+    StubFec encoder;
+    const char data[] = "frame-bytes-123";
+    uint64_t pts = 0;
+    auto enc = encoder.encode_with_header(1, 1, 5, 1, 0, pts, data, sizeof(data)-1);
+
+    // simulate receiving the whole encoded packet
+    auto pkt = encoder.decode_packet(enc.data(), enc.size());
+    REQUIRE(pkt.payload.size() == sizeof(data)-1);
+    REQUIRE(std::string(pkt.payload.begin(), pkt.payload.end()) == std::string(data));
+}
+
 TEST_CASE("StubFec encode_with_header and decode_packet roundtrip small", "[encoder]") {
     StubFec fec;
     std::string s = "hello world";

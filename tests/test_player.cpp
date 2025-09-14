@@ -15,21 +15,6 @@ using namespace project::player;
 using namespace project::common;
 
 /**
- * Sanity check: StubFec decode_payload returns exact input (pass-through).
- */
-TEST_CASE("StubFec pass-through decode", "[fec][decode]") {
-    StubFec encoder;
-    const char data[] = "frame-bytes-123";
-    uint64_t pts = 0;
-    auto enc = encoder.encode_with_header(1, 1, 5, 1, 0, pts, data, sizeof(data)-1);
-
-    // simulate receiving the whole encoded packet
-    auto pkt = encoder.decode_packet(enc.data(), enc.size());
-    REQUIRE(pkt.payload.size() == sizeof(data)-1);
-    REQUIRE(std::string(pkt.payload.begin(), pkt.payload.end()) == std::string(data));
-}
-
-/**
  * PlayerProcess basic lifecycle smoke test (platform-dependent):
  * On CI without ffplay or in headless environment player may exit immediately.
  * Test accepts both cases:
