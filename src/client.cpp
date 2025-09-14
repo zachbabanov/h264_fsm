@@ -538,27 +538,27 @@ bool Client::udpStreamRun(sock_t udpSock) {
                             poll(&pfd, 1, 50);
                             retry++;
                             if (retry > 20) {
-                                LOG_NET_INFO("sendto repeatedly EAGAIN, aborting fragment");
+                                LOG_NET_DEBUG("sendto repeatedly EAGAIN, aborting fragment");
                                 break;
                             }
                             continue;
                         }
 #else
-                            int err = WSAGetLastError();
-                        if (err == WSAEWOULDBLOCK) {
-                            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                            retry++;
-                            if (retry > 50) break;
-                            continue;
-                        }
+                        int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            retry++;
+            if (retry > 50) break;
+            continue;
+        }
 #endif
-                        LOG_NET_INFO("sendto failed: {}", strerror(errno));
+                        LOG_NET_DEBUG("sendto failed: {}", strerror(errno));
                         break;
                     }
                     sent_total += rc;
                 }
                 if (sent_total != (ssize_t)tosend) {
-                    LOG_NET_INFO("Fragment send incomplete ({}/{})", sent_total, tosend);
+                    LOG_NET_DEBUG("Fragment send incomplete ({}/{})", sent_total, tosend);
                     // best-effort: continue
                 }
 
@@ -569,7 +569,7 @@ bool Client::udpStreamRun(sock_t udpSock) {
             } // frag loop
 
             // Small gap between NALs to avoid saturating link
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         } // for nals
 
         if (!loop_) break;

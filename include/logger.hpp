@@ -118,15 +118,29 @@ namespace project::log {
 #define LOG_GEN_WARN(fmt, ...)  project::log::Logger::instance().logf(project::log::Level::WARN,  project::log::Category::GENERAL, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define LOG_GEN_ERROR(fmt, ...) project::log::Logger::instance().logf(project::log::Level::ERROR, project::log::Category::GENERAL, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
-#define LOG_VIDEO_INFO(fmt, ...) project::log::Logger::instance().logf(project::log::Level::INFO, project::log::Category::VIDEO, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_VIDEO_TRACE(fmt, ...) project::log::Logger::instance().logf(project::log::Level::TRACE, project::log::Category::VIDEO, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define LOG_VIDEO_DEBUG(fmt, ...) project::log::Logger::instance().logf(project::log::Level::DEBUG, project::log::Category::VIDEO, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
-#define LOG_FEC_INFO(fmt, ...) project::log::Logger::instance().logf(project::log::Level::INFO, project::log::Category::FEC, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
-#define LOG_FEC_WARN(fmt, ...)  project::log::Logger::instance().logf(project::log::Level::WARN,  project::log::Category::FEC, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_VIDEO_INFO(fmt, ...) project::log::Logger::instance().logf(project::log::Level::INFO, project::log::Category::VIDEO, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_VIDEO_WARN(fmt, ...) project::log::Logger::instance().logf(project::log::Level::WARN, project::log::Category::VIDEO, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_VIDEO_ERROR(fmt, ...) project::log::Logger::instance().logf(project::log::Level::ERROR, project::log::Category::VIDEO, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+
+#define LOG_FEC_TRACE(fmt, ...) project::log::Logger::instance().logf(project::log::Level::TRACE, project::log::Category::FEC, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define LOG_FEC_DEBUG(fmt, ...) project::log::Logger::instance().logf(project::log::Level::DEBUG, project::log::Category::FEC, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_FEC_INFO(fmt, ...)  project::log::Logger::instance().logf(project::log::Level::INFO,  project::log::Category::FEC, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_FEC_WARN(fmt, ...) project::log::Logger::instance().logf(project::log::Level::WARN, project::log::Category::FEC, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define LOG_FEC_ERROR(fmt, ...) project::log::Logger::instance().logf(project::log::Level::ERROR, project::log::Category::FEC, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+
+#define LOG_PLAYER_TRACE(fmt, ...) project::log::Logger::instance().logf(project::log::Level::TRACE, project::log::Category::PLAYER, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_PLAYER_DEBUG(fmt, ...) project::log::Logger::instance().logf(project::log::Level::DEBUG, project::log::Category::PLAYER, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define LOG_PLAYER_INFO(fmt, ...) project::log::Logger::instance().logf(project::log::Level::INFO, project::log::Category::PLAYER, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_PLAYER_WARN(fmt, ...) project::log::Logger::instance().logf(project::log::Level::WARN, project::log::Category::PLAYER, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_PLAYER_ERROR(fmt, ...) project::log::Logger::instance().logf(project::log::Level::ERROR, project::log::Category::PLAYER, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+
+#define LOG_NET_TRACE(fmt, ...) project::log::Logger::instance().logf(project::log::Level::TRACE, project::log::Category::NETWORK, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_NET_DEBUG(fmt, ...) project::log::Logger::instance().logf(project::log::Level::DEBUG, project::log::Category::NETWORK, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define LOG_NET_INFO(fmt, ...) project::log::Logger::instance().logf(project::log::Level::INFO, project::log::Category::NETWORK, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 #define LOG_NET_WARN(fmt, ...) project::log::Logger::instance().logf(project::log::Level::WARN, project::log::Category::NETWORK, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_NET_ERROR(fmt, ...) project::log::Logger::instance().logf(project::log::Level::ERROR, project::log::Category::NETWORK, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
 
 } // namespace project::log
 

@@ -555,7 +555,7 @@ void Server::handleUdpVideoEvent(sock_t udpFd) {
     if (n <= 0) return;
 
     if ((size_t)n < sizeof(common::UdpVideoFragmentHeader)) {
-        LOG_NET_INFO("short video fragment from {}", inet_ntoa(src.sin_addr));
+        LOG_NET_DEBUG("short video fragment from {}", inet_ntoa(src.sin_addr));
         return;
     }
 
@@ -603,7 +603,7 @@ void Server::handleUdpVideoEvent(sock_t udpFd) {
         }
     }
     if (!conn) {
-        LOG_NET_INFO("Video fragment from unknown client {} - ignoring", client_id);
+        LOG_NET_DEBUG("Video fragment from unknown client {} - ignoring", client_id);
         return;
     }
 
@@ -635,14 +635,14 @@ void Server::handleUdpVideoEvent(sock_t udpFd) {
         return;
     }
 
-    // If this fragment already received (by index) we can skip copying but re-check partial overlap: we rely on per-frag granularity
+    // If this fragment already received, ignore; else copy
     if (!ip.fragment_received[frag_index]) {
-        // copy payload into buffer at frag_offset
         memcpy(ip.buffer.data() + frag_offset, buf + sizeof(vhdr), frag_payload_len);
         ip.fragment_received[frag_index] = 1;
         ip.received_bytes += frag_payload_len;
     } else {
         // duplicate fragment - ignore
+        LOG_FEC_DEBUG("Duplicate fragment client={} seq={} frag={} ignored", client_id, packet_seq, frag_index);
     }
 
     LOG_FEC_DEBUG("Received fragment client={} seq={} frag={}/{} off={} len={} got_bytes={}/{}",
@@ -650,11 +650,13 @@ void Server::handleUdpVideoEvent(sock_t udpFd) {
 
     // If we've received all bytes (simple test), assemble and decode
     if (ip.received_bytes >= ip.total_packet_len) {
+        auto assembled_time = std::chrono::steady_clock::now();
+
         // Move assembled buffer into local vector and erase inprogress
         std::vector<char> assembled = std::move(ip.buffer);
         inprogress_map_.erase(it);
 
-        // decode assembled packet with StubFec decoder (it expects FEC header + encoded payload)
+        // decode assembled packet with StubFec decoder (it logs decode_time_ms)
         StubFec decoder;
         auto pkt = decoder.decode_packet(assembled.data(), assembled.size());
         if (pkt.payload.empty()) {
@@ -686,11 +688,30 @@ void Server::handleUdpVideoEvent(sock_t udpFd) {
         // Add to frame queue
         conn->frame_queue.push(frame);
 
+        // If this is the first frame, initialize playback timing
         if (!conn->first_frame_received) {
             conn->first_frame_received = true;
             conn->first_pts = frame.pts;
             conn->playback_start = std::chrono::steady_clock::now();
             conn->playback_started = true;
+        }
+
+        // Compute enqueue-time latency metric (wallclock vs PTS schedule)
+        {
+            auto now = std::chrono::steady_clock::now();
+            // If playback started, compute relative offsets
+            if (conn->playback_started) {
+                auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - conn->playback_start).count();
+                int64_t target_offset = (int64_t)frame.pts - (int64_t)conn->first_pts;
+                if (target_offset < 0) target_offset = 0;
+                int64_t enqueue_latency = (int64_t)elapsed_ms - target_offset;
+                LOG_VIDEO_INFO("frame_enqueue_latency: client_id={} seq={} pts={} enqueue_latency_ms={} queue_size={} frame_size={}",
+                               conn->clientId, packet_seq, frame.pts, enqueue_latency, (uint32_t)conn->frame_queue.size(), (uint32_t)frame.data.size());
+            } else {
+                // Shouldn't happen because we set playback_started above, but keep guard
+                LOG_VIDEO_INFO("frame_enqueue (no playback started yet): client_id={} seq={} pts={} queue_size={} frame_size={}",
+                               conn->clientId, packet_seq, frame.pts, (uint32_t)conn->frame_queue.size(), (uint32_t)frame.data.size());
+            }
         }
 
         LOG_PLAYER_INFO("Queued frame for client_id={} pts={} is_keyframe={} size={}",
@@ -723,7 +744,11 @@ void Server::processFrameQueue(Connection &conn) {
                 combined.insert(combined.end(), conn.pps_data.begin(), conn.pps_data.end());
                 combined.insert(combined.end(), frame.data.begin(), frame.data.end());
 
+                auto write_t0 = std::chrono::high_resolution_clock::now();
                 ssize_t w = conn.player->write_data(combined.data(), combined.size());
+                auto write_t1 = std::chrono::high_resolution_clock::now();
+                double write_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(write_t1 - write_t0).count();
+
                 if (w < 0) {
                     conn.state = State::CLOSING;
                     return;
@@ -732,11 +757,15 @@ void Server::processFrameQueue(Connection &conn) {
                     conn.playerBuffer.append(combined.data() + w, combined.data() + combined.size());
                 }
 
-                LOG_PLAYER_INFO("Sent keyframe with SPS/PPS for client_id={} pts={} size={}",
-                                conn.clientId, frame.pts, combined.size());
+                LOG_PLAYER_INFO("Sent keyframe with SPS/PPS for client_id={} pts={} size={} write_time_ms={:.3f}",
+                                conn.clientId, frame.pts, combined.size(), write_ms);
             } else {
                 // Send frame as-is
+                auto write_t0 = std::chrono::high_resolution_clock::now();
                 ssize_t w = conn.player->write_data(frame.data.data(), frame.data.size());
+                auto write_t1 = std::chrono::high_resolution_clock::now();
+                double write_ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(write_t1 - write_t0).count();
+
                 if (w < 0) {
                     conn.state = State::CLOSING;
                     return;
@@ -745,13 +774,14 @@ void Server::processFrameQueue(Connection &conn) {
                     conn.playerBuffer.append(frame.data.data() + w, frame.data.data() + frame.data.size());
                 }
 
-                LOG_PLAYER_INFO("Sent frame for client_id={} pts={} size={}",
-                                conn.clientId, frame.pts, frame.data.size());
+                // Important player/per-frame metric (writes)
+                LOG_PLAYER_INFO("Sent frame for client_id={} pts={} size={} write_time_ms={:.3f}",
+                                conn.clientId, frame.pts, frame.data.size(), write_ms);
             }
 
-            // Log latency: difference between wallclock elapsed and target offset
+            // Log latency: difference between wallclock elapsed and target offset (display-time latency)
             int64_t latency = (int64_t)elapsed_ms - target_offset;
-            LOG_VIDEO_INFO("frame_latency: client_id={} pts={} target_offset={} elapsed={} latency={} queue_size={}",
+            LOG_VIDEO_INFO("frame_latency: client_id={} pts={} target_offset_ms={} elapsed_ms={} latency_ms={} queue_size={}",
                            conn.clientId, frame.pts, target_offset, (uint64_t)elapsed_ms, latency, (uint32_t)conn.frame_queue.size());
 
             conn.frame_queue.pop();
