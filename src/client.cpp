@@ -22,7 +22,6 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <poll.h>
-#include <unistd.h>
 #else
 #include <winsock2.h>
 #include <ws2tcpip.h>

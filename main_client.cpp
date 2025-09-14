@@ -7,12 +7,12 @@
 #include <client.hpp>
 #include <logger.hpp>
 
+#include <algorithm>
 #include <iostream>
+#include <fstream>
 #include <cstdlib>
 #include <string>
 #include <vector>
-#include <fstream>
-#include <algorithm>
 
 using namespace project::client;
 using namespace project::log;

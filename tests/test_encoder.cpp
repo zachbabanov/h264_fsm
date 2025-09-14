@@ -1,5 +1,13 @@
+/*
+* @license
+* (C) zachbabanov
+*
+*/
+
 #include <catch2/catch.hpp>
-#include "encoder.hpp"
+
+#include <encoder.hpp>
+
 #include <vector>
 #include <string>
 
@@ -11,9 +19,18 @@ TEST_CASE("StubFec encode_with_header and decode_packet roundtrip small", "[enco
     uint32_t cid = 42;
     uint32_t seq = 7;
     uint16_t k = 10, m = 2, flags = 0;
-    auto packet = fec.encode_with_header(cid, seq, k, m, flags, s.data(), s.size());
-    REQUIRE(packet.size() == FEC_PACKET_HEADER_SIZE + s.size());
-    // parse header and decode
+    uint64_t pts = 0;
+
+    auto packet = fec.encode_with_header(cid, seq, k, m, flags, pts, s.data(), s.size());
+
+    // parse header to learn encoded payload length and orig_len
+    auto hdr = StubFec::parse_header(packet.data(), packet.size());
+    REQUIRE(hdr.orig_len == (uint32_t)s.size());
+
+    // total packet on wire should be header + encoded_payload_len
+    REQUIRE(packet.size() == FEC_PACKET_HEADER_SIZE + hdr.payload_len);
+
+    // parse/ decode
     auto pkt = fec.decode_packet(packet.data(), packet.size());
     REQUIRE(pkt.client_id == cid);
     REQUIRE(pkt.packet_seq == seq);
@@ -27,8 +44,15 @@ TEST_CASE("StubFec encode_with_header empty payload", "[encoder]") {
     StubFec fec;
     uint32_t cid = 1;
     uint32_t seq = 1;
-    auto packet = fec.encode_with_header(cid, seq, 4, 2, 0, nullptr, 0);
-    REQUIRE(packet.size() == FEC_PACKET_HEADER_SIZE);
+    uint16_t k = 4, m = 2, flags = 0;
+    uint64_t pts = 0;
+
+    auto packet = fec.encode_with_header(cid, seq, k, m, flags, pts, nullptr, 0);
+
+    auto hdr = StubFec::parse_header(packet.data(), packet.size());
+    REQUIRE(hdr.orig_len == 0);
+    REQUIRE(packet.size() == FEC_PACKET_HEADER_SIZE + hdr.payload_len);
+
     auto pkt = fec.decode_packet(packet.data(), packet.size());
     REQUIRE(pkt.payload.empty());
     REQUIRE(pkt.client_id == cid);
@@ -40,7 +64,9 @@ TEST_CASE("StubFec large payload", "[encoder]") {
     std::vector<char> data(100000, 'A');
     uint32_t cid = 99;
     uint32_t seq = 123;
-    auto packet = fec.encode_with_header(cid, seq, 20, 4, 0, data.data(), data.size());
+    uint64_t pts = 0;
+
+    auto packet = fec.encode_with_header(cid, seq, 20, 4, 0, pts, data.data(), data.size());
     auto pkt = fec.decode_packet(packet.data(), packet.size());
     REQUIRE(pkt.payload.size() == data.size());
     REQUIRE(std::equal(pkt.payload.begin(), pkt.payload.end(), data.begin()));

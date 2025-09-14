@@ -7,15 +7,14 @@
 #include <encoder.hpp>
 #include <logger.hpp>
 #include <common.hpp>
-#include <vector>
+
 #include <cstring>
 #include <cassert>
 #include <sstream>
 #include <iomanip>
 #include <chrono>
+#include <vector>
 
-// rscoder header (from FetchContent)
-// Adjust include path if needed (CMake sets rscoder source dir in include path)
 #include <rs.hpp>
 
 using namespace project::common;

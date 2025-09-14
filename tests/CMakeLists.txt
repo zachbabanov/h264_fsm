@@ -10,8 +10,7 @@ FetchContent_MakeAvailable(catch2)
 
 add_executable(tests_runner
   test_common.cpp
-  test_server_helpers.cpp
-  test_player.cpp
+        test_player.cpp
   test_encoder.cpp
 )
 
