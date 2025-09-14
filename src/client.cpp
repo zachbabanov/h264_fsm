@@ -4,9 +4,9 @@
 *
 */
 
+#include <encoder.hpp>
 #include <client.hpp>
 #include <common.hpp>
-#include <encoder.hpp>
 #include <logger.hpp>
 
 #include <iostream>

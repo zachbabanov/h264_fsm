@@ -16,12 +16,13 @@ using namespace project::client;
 using namespace project::log;
 
 static void print_usage(const char *prog) {
-    std::cerr << "Usage: " << prog << " [--bitrate <kbps>] [--no-fec] <host:port> <h264_file> <loop (0|1)>\n";
-    std::cerr << "Example: " << prog << " --bitrate 1000 127.0.0.1:8000 test.h264 1\n";
+    std::cerr << "Usage: " << prog << " [--bitrate <kbps>] [--no-fec] [--log <log_file>] <host:port> <h264_file> <loop (0|1)>\n";
+    std::cerr << "Example: " << prog << " --bitrate 1000 --log client.log 127.0.0.1:8000 test.h264 1\n";
     std::cerr << "Example (no FEC): " << prog << " --no-fec 127.0.0.1:8000 test.h264 0\n";
 }
 
 int main(int argc, char **argv) {
+    // default level; caller can override by editing code or adding a CLI flag in the future
     Logger::instance().set_level(Level::DEBUG);
 
     if (argc < 4) {
@@ -34,8 +35,9 @@ int main(int argc, char **argv) {
     bool loop = false;
     uint32_t initial_bitrate_kbps = 0;
     bool use_fec = true;
+    std::string log_file;
 
-    // Simple arg parsing that allows --bitrate and --no-fec anywhere
+    // Simple arg parsing that allows --bitrate, --no-fec and --log anywhere
     std::vector<std::string> pos;
     for (int i = 1; i < argc; ++i) {
         std::string a(argv[i]);
@@ -48,9 +50,22 @@ int main(int argc, char **argv) {
             i++;
         } else if (a == "--no-fec") {
             use_fec = false;
+        } else if (a == "--log") {
+            if (i + 1 >= argc) {
+                std::cerr << "--log requires a path\n";
+                return 1;
+            }
+            log_file = argv[i+1];
+            i++;
         } else {
             pos.push_back(a);
         }
+    }
+
+    // If user provided a log file, open it
+    if (!log_file.empty()) {
+        // Logger::open_logfile likely accepts const char* or std::string; use c_str() for safety
+        Logger::instance().open_logfile(log_file.c_str());
     }
 
     if (pos.size() < 3) {
