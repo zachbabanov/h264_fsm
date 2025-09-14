@@ -24,7 +24,8 @@ namespace project {
         class Client {
         public:
             // added use_fec flag (true = enable FEC encoding path; false = pass-through)
-            Client(const std::string &host, int port, const std::string &h264File, bool loop, bool use_fec = true);
+            // stream_mode = true -> h264Source treated as stream URL and read via ffmpeg
+            Client(const std::string &host, int port, const std::string &h264Source, bool loop, bool use_fec = true, bool stream_mode = false);
             ~Client();
 
             bool run();
@@ -55,13 +56,16 @@ namespace project {
             std::string host_;
             int tcpPort_;
             int udpPort_;
-            std::string h264File_;
+            std::string h264Source_; // either path to file or stream URL
             bool loop_;
             uint32_t clientId_;
             uint32_t packetSeq_;
 
             // new: whether to use FEC encoding
             bool use_fec_;
+
+            // new: whether h264Source_ is a live stream URL (ffmpeg) instead of a file
+            bool stream_mode_;
 
             // rate control
             std::atomic<uint32_t> bitrate_kbps_; // 0 = unlimited
